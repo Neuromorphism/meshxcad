@@ -1,0 +1,11 @@
+Object,Baseline,Result,Improvement%,Status
+spur_gear,3.0301,0.2478,91.82,PASS
+pipe_flange,1.6635,0.7810,53.05,PASS
+shelf_bracket,2.3822,1.2004,49.61,PASS
+hex_nut,1.9877,0.0302,98.48,PASS
+picture_frame,2.2681,0.3868,82.94,PASS
+star_knob,2.5928,0.0907,96.50,PASS
+fluted_column,3.6621,0.0991,97.29,PASS
+castellated_ring,0.5592,0.2713,51.48,PASS
+gear_shift_knob,1.1465,0.6395,44.22,PASS
+lattice_panel,0.5714,0.4220,26.14,PASS
