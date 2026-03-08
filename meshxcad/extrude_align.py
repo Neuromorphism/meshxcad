@@ -1,0 +1,998 @@
+"""Extrude-to-mesh alignment: 12 features for moving CAD extrude geometry
+toward mesh geometry by analyzing cross-sections and adapting profiles.
+
+Given a CAD model built from extrusions and a target mesh, these tools let you:
+1.  Extract 2D cross-sections from a mesh at arbitrary Z heights.
+2.  Compare an extrude's polygon profile against the mesh cross-section.
+3.  Fit primitive shapes (circle, ellipse, rectangle, regular polygon)
+    to a mesh cross-section.
+4.  Fit a smooth spline contour to an irregular cross-section.
+5.  Compute a per-vertex offset (inward/outward) to resize a profile.
+6.  Blend/morph between two profiles at different heights.
+7.  Taper an extrude so the top and bottom profiles differ linearly.
+8.  Twist an extrude (progressive rotation along the extrusion axis).
+9.  Boolean-union two 2D profiles into a single merged outline.
+10. Boolean-difference one 2D profile from another.
+11. Adaptively rebuild an extrude by sampling the mesh at multiple
+    Z-slices and extruding slice-by-slice.
+12. Score a full extrude against its corresponding mesh region and
+    return an ordered list of suggested manipulations.
+"""
+
+import math
+import numpy as np
+from scipy.spatial import ConvexHull, KDTree
+from scipy.interpolate import CubicSpline
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _polygon_area_signed(poly):
+    """Signed area of a 2D polygon (positive if CCW)."""
+    poly = np.asarray(poly)
+    x, y = poly[:, 0], poly[:, 1]
+    return 0.5 * float(np.sum(x * np.roll(y, -1) - np.roll(x, -1) * y))
+
+
+def _polygon_centroid(poly):
+    """Centroid of a 2D polygon."""
+    poly = np.asarray(poly)
+    n = len(poly)
+    if n == 0:
+        return np.zeros(2)
+    cx = float(np.mean(poly[:, 0]))
+    cy = float(np.mean(poly[:, 1]))
+    return np.array([cx, cy])
+
+
+def _order_polygon_ccw(points):
+    """Order 2D points into a CCW polygon via angular sort around centroid."""
+    pts = np.asarray(points, dtype=np.float64)
+    if len(pts) < 3:
+        return pts
+    c = _polygon_centroid(pts)
+    angles = np.arctan2(pts[:, 1] - c[1], pts[:, 0] - c[0])
+    order = np.argsort(angles)
+    return pts[order]
+
+
+def _resample_polygon(poly, n_out):
+    """Resample a closed polygon to *n_out* equi-spaced points."""
+    poly = np.asarray(poly, dtype=np.float64)
+    # Close the loop
+    closed = np.vstack([poly, poly[0:1]])
+    diffs = np.diff(closed, axis=0)
+    seg_lens = np.linalg.norm(diffs, axis=1)
+    cum = np.concatenate([[0], np.cumsum(seg_lens)])
+    total = cum[-1]
+    if total < 1e-12:
+        return poly[:n_out] if len(poly) >= n_out else poly
+
+    targets = np.linspace(0, total, n_out, endpoint=False)
+    out = np.zeros((n_out, 2))
+    for i, t in enumerate(targets):
+        idx = np.searchsorted(cum, t, side="right") - 1
+        idx = max(0, min(idx, len(poly) - 1))
+        nxt = (idx + 1) % len(poly)
+        seg = seg_lens[idx]
+        frac = (t - cum[idx]) / seg if seg > 1e-12 else 0.0
+        out[i] = poly[idx] * (1 - frac) + poly[nxt] * frac
+    return out
+
+
+# =========================================================================
+# 1. extract_cross_section
+# =========================================================================
+
+def extract_cross_section(vertices, faces, z_height, tolerance=None):
+    """Slice a triangle mesh at *z_height* and return the 2D cross-section.
+
+    For each triangle that straddles the plane z = z_height, we compute the
+    two intersection points on the triangle edges, yielding line segments.
+    The segments are then chained into an ordered polygon.
+
+    Args:
+        vertices: (N, 3) mesh vertices
+        faces:    (M, 3) triangle indices
+        z_height: Z value of the slicing plane
+        tolerance: optional thickness band (default: 1e-6)
+
+    Returns:
+        polygon: (K, 2) array of ordered (x, y) points, or empty array
+    """
+    if tolerance is None:
+        tolerance = 1e-6
+
+    verts = np.asarray(vertices, dtype=np.float64)
+    tris = np.asarray(faces)
+
+    segments = []
+    for tri in tris:
+        v = verts[tri]  # (3, 3)
+        below = v[:, 2] < z_height - tolerance
+        above = v[:, 2] > z_height + tolerance
+
+        # We need exactly 2 intersections (one vertex on each side)
+        n_below = int(np.sum(below))
+        n_above = int(np.sum(above))
+        # If all on one side, no intersection
+        if n_below == 3 or n_above == 3:
+            continue
+        # If all coincident with the plane, skip (degenerate)
+        if n_below == 0 and n_above == 0:
+            continue
+
+        pts = []
+        for i in range(3):
+            j = (i + 1) % 3
+            z0, z1 = v[i, 2], v[j, 2]
+            if (z0 - z_height) * (z1 - z_height) < 0:
+                # Edge crosses the plane
+                t = (z_height - z0) / (z1 - z0)
+                p = v[i] + t * (v[j] - v[i])
+                pts.append(p[:2])
+            elif abs(z0 - z_height) <= tolerance:
+                pts.append(v[i, :2].copy())
+            elif abs(z1 - z_height) <= tolerance:
+                pts.append(v[j, :2].copy())
+
+        # Deduplicate very close points
+        if len(pts) >= 2:
+            unique = [pts[0]]
+            for p in pts[1:]:
+                if np.linalg.norm(p - unique[-1]) > tolerance:
+                    unique.append(p)
+            if len(unique) >= 2:
+                segments.append((unique[0], unique[1]))
+
+    if not segments:
+        return np.zeros((0, 2))
+
+    # Chain segments into an ordered polygon
+    polygon = _chain_segments(segments, tolerance * 10)
+    if len(polygon) < 3:
+        # Fallback: just collect all unique points and order them
+        all_pts = []
+        for a, b in segments:
+            all_pts.append(a)
+            all_pts.append(b)
+        all_pts = np.array(all_pts)
+        if len(all_pts) < 3:
+            return all_pts
+        return _order_polygon_ccw(all_pts)
+
+    return np.array(polygon)
+
+
+def _chain_segments(segments, tol):
+    """Chain line segments into a polygon by matching endpoints."""
+    if not segments:
+        return []
+    remaining = list(range(len(segments)))
+    chain = [segments[0][0], segments[0][1]]
+    remaining.remove(0)
+
+    max_iter = len(segments) * 2
+    for _ in range(max_iter):
+        if not remaining:
+            break
+        tail = chain[-1]
+        found = False
+        for idx in remaining:
+            a, b = segments[idx]
+            if np.linalg.norm(a - tail) < tol:
+                chain.append(b)
+                remaining.remove(idx)
+                found = True
+                break
+            elif np.linalg.norm(b - tail) < tol:
+                chain.append(a)
+                remaining.remove(idx)
+                found = True
+                break
+        if not found:
+            break
+
+    return chain
+
+
+# =========================================================================
+# 2. compare_cross_sections
+# =========================================================================
+
+def compare_cross_sections(profile_a, profile_b, n_sample=64):
+    """Compare two 2D profiles and return similarity metrics.
+
+    Both profiles are resampled to *n_sample* equi-arc-length points, then
+    compared via Hausdorff distance, mean point distance, and area ratio.
+
+    Args:
+        profile_a: (K, 2) first profile (e.g. extrude polygon)
+        profile_b: (L, 2) second profile (e.g. mesh cross-section)
+        n_sample:  resample count
+
+    Returns:
+        dict with keys:
+            hausdorff   — max min-distance (worst-case mismatch)
+            mean_dist   — average min-distance
+            area_ratio  — area_a / area_b (1.0 = same area)
+            iou         — approximate intersection-over-union (convex)
+    """
+    a = _resample_polygon(np.asarray(profile_a), n_sample)
+    b = _resample_polygon(np.asarray(profile_b), n_sample)
+
+    tree_b = KDTree(b)
+    dists_a, _ = tree_b.query(a)
+    tree_a = KDTree(a)
+    dists_b, _ = tree_a.query(b)
+
+    hausdorff = float(max(np.max(dists_a), np.max(dists_b)))
+    mean_dist = float((np.mean(dists_a) + np.mean(dists_b)) / 2)
+
+    area_a = abs(_polygon_area_signed(a))
+    area_b = abs(_polygon_area_signed(b))
+    area_ratio = area_a / area_b if area_b > 1e-12 else float("inf")
+
+    # Convex IoU approximation
+    try:
+        combined = np.vstack([a, b])
+        hull_union = ConvexHull(combined)
+        union_area = hull_union.volume  # In 2D, volume = area
+        hull_a = ConvexHull(a)
+        hull_b = ConvexHull(b)
+        inter_area = hull_a.volume + hull_b.volume - union_area
+        iou = max(inter_area, 0) / union_area if union_area > 1e-12 else 0.0
+    except Exception:
+        iou = 0.0
+
+    return {
+        "hausdorff": hausdorff,
+        "mean_dist": mean_dist,
+        "area_ratio": area_ratio,
+        "iou": iou,
+    }
+
+
+# =========================================================================
+# 3. fit_primitive_to_cross_section
+# =========================================================================
+
+def fit_primitive_to_cross_section(points):
+    """Fit several primitive shapes to a 2D point cloud and return the best.
+
+    Candidates: circle, axis-aligned rectangle, regular polygons (3–8 sides).
+
+    Args:
+        points: (K, 2) array
+
+    Returns:
+        dict with keys:
+            best        — name of best-fit primitive
+            params      — dict of primitive parameters
+            polygon     — (M, 2) fitted polygon vertices
+            residual    — mean radial residual of best fit
+            all_fits    — list of (name, residual) for every candidate
+    """
+    pts = np.asarray(points, dtype=np.float64)
+    cx, cy = float(np.mean(pts[:, 0])), float(np.mean(pts[:, 1]))
+    centered = pts - np.array([cx, cy])
+    radii = np.linalg.norm(centered, axis=1)
+    mean_r = float(np.mean(radii))
+
+    fits = []
+
+    # --- circle ---
+    circ_residual = float(np.mean(np.abs(radii - mean_r)))
+    n_circ = 48
+    circ_poly = np.array([
+        [cx + mean_r * math.cos(2 * math.pi * i / n_circ),
+         cy + mean_r * math.sin(2 * math.pi * i / n_circ)]
+        for i in range(n_circ)
+    ])
+    fits.append(("circle", circ_residual, {"center": (cx, cy), "radius": mean_r}, circ_poly))
+
+    # --- axis-aligned bounding rectangle ---
+    xmin, xmax = float(pts[:, 0].min()), float(pts[:, 0].max())
+    ymin, ymax = float(pts[:, 1].min()), float(pts[:, 1].max())
+    rect_poly = np.array([[xmin, ymin], [xmax, ymin], [xmax, ymax], [xmin, ymax]])
+    # Residual: mean distance from each point to nearest edge
+    rect_dists = np.minimum(
+        np.minimum(pts[:, 0] - xmin, xmax - pts[:, 0]),
+        np.minimum(pts[:, 1] - ymin, ymax - pts[:, 1]),
+    )
+    rect_residual = float(np.mean(np.abs(rect_dists)))
+    fits.append(("rectangle", rect_residual,
+                 {"center": (cx, cy), "width": xmax - xmin, "height": ymax - ymin},
+                 rect_poly))
+
+    # --- regular polygons 3–8 ---
+    for n_sides in range(3, 9):
+        best_res = float("inf")
+        best_angle = 0.0
+        for start_deg in range(0, 360 // n_sides, 5):
+            start_a = math.radians(start_deg)
+            poly = np.array([
+                [cx + mean_r * math.cos(start_a + 2 * math.pi * i / n_sides),
+                 cy + mean_r * math.sin(start_a + 2 * math.pi * i / n_sides)]
+                for i in range(n_sides)
+            ])
+            tree = KDTree(poly)
+            dists, _ = tree.query(pts)
+            res = float(np.mean(dists))
+            if res < best_res:
+                best_res = res
+                best_angle = start_a
+                best_poly = poly
+        fits.append((f"polygon_{n_sides}", best_res,
+                     {"center": (cx, cy), "radius": mean_r,
+                      "n_sides": n_sides, "start_angle": best_angle},
+                     best_poly))
+
+    fits.sort(key=lambda x: x[1])
+    best_name, best_res, best_params, best_poly = fits[0]
+    return {
+        "best": best_name,
+        "params": best_params,
+        "polygon": best_poly,
+        "residual": best_res,
+        "all_fits": [(f[0], f[1]) for f in fits],
+    }
+
+
+# =========================================================================
+# 4. fit_ellipse_to_cross_section
+# =========================================================================
+
+def fit_ellipse_to_cross_section(points):
+    """Fit an axis-aligned ellipse to 2D points via least-squares.
+
+    Minimizes algebraic distance for:  (x-cx)^2/a^2 + (y-cy)^2/b^2 = 1
+
+    Args:
+        points: (K, 2)
+
+    Returns:
+        dict: center (cx, cy), semi_axes (a, b), residual, polygon (N, 2)
+    """
+    pts = np.asarray(points, dtype=np.float64)
+    cx, cy = float(np.mean(pts[:, 0])), float(np.mean(pts[:, 1]))
+    dx = pts[:, 0] - cx
+    dy = pts[:, 1] - cy
+
+    # Fit: x'^2/a^2 + y'^2/b^2 = 1  =>  solve for 1/a^2, 1/b^2
+    A = np.column_stack([dx ** 2, dy ** 2])
+    b_vec = np.ones(len(pts))
+    result, _, _, _ = np.linalg.lstsq(A, b_vec, rcond=None)
+    inv_a2, inv_b2 = result
+    a = 1.0 / math.sqrt(max(abs(inv_a2), 1e-12))
+    b = 1.0 / math.sqrt(max(abs(inv_b2), 1e-12))
+
+    # Residual: distance from each point to the nearest point on the ellipse
+    angles = np.arctan2(dy, dx)
+    ellipse_r = a * b / np.sqrt((b * np.cos(angles)) ** 2 + (a * np.sin(angles)) ** 2)
+    actual_r = np.sqrt(dx ** 2 + dy ** 2)
+    residual = float(np.mean(np.abs(actual_r - ellipse_r)))
+
+    # Generate polygon
+    n_pts = 64
+    t = np.linspace(0, 2 * math.pi, n_pts, endpoint=False)
+    polygon = np.column_stack([cx + a * np.cos(t), cy + b * np.sin(t)])
+
+    return {
+        "center": (cx, cy),
+        "semi_axes": (float(a), float(b)),
+        "residual": residual,
+        "polygon": polygon,
+    }
+
+
+# =========================================================================
+# 5. offset_profile
+# =========================================================================
+
+def offset_profile(polygon, distance):
+    """Offset a 2D polygon inward (negative) or outward (positive).
+
+    Uses vertex-normal offsetting for simplicity.
+
+    Args:
+        polygon:  (K, 2) ordered polygon
+        distance: offset distance (positive = outward, negative = inward)
+
+    Returns:
+        offset_polygon: (K, 2)
+    """
+    poly = np.asarray(polygon, dtype=np.float64)
+    n = len(poly)
+    if n < 3:
+        return poly.copy()
+
+    # Determine polygon winding (sign of signed area)
+    # For CCW polygon: outward normal is rotate-right (CW 90°): (dy, -dx)
+    # For CW polygon: outward normal is rotate-left (CCW 90°): (-dy, dx)
+    area_sign = 1.0 if _polygon_area_signed(poly) > 0 else -1.0
+
+    normals = np.zeros_like(poly)
+    for i in range(n):
+        prev_i = (i - 1) % n
+        next_i = (i + 1) % n
+        edge_prev = poly[i] - poly[prev_i]
+        edge_next = poly[next_i] - poly[i]
+        # Outward normals: for CCW, rotate 90° CW: (dy, -dx)
+        n_prev = np.array([edge_prev[1], -edge_prev[0]]) * area_sign
+        n_next = np.array([edge_next[1], -edge_next[0]]) * area_sign
+        n_prev_len = np.linalg.norm(n_prev)
+        n_next_len = np.linalg.norm(n_next)
+        if n_prev_len > 1e-12:
+            n_prev /= n_prev_len
+        if n_next_len > 1e-12:
+            n_next /= n_next_len
+        normals[i] = (n_prev + n_next)
+        nlen = np.linalg.norm(normals[i])
+        if nlen > 1e-12:
+            normals[i] /= nlen
+
+    return poly + normals * distance
+
+
+# =========================================================================
+# 6. blend_profiles
+# =========================================================================
+
+def blend_profiles(profile_a, profile_b, t, n_sample=64):
+    """Linearly blend two 2D profiles.
+
+    Both profiles are resampled to the same number of points, then linearly
+    interpolated:  result = (1-t)*A + t*B.
+
+    Args:
+        profile_a: (K, 2) first profile (t=0)
+        profile_b: (L, 2) second profile (t=1)
+        t:         blend factor in [0, 1]
+        n_sample:  resample count
+
+    Returns:
+        blended: (n_sample, 2)
+    """
+    a = _resample_polygon(np.asarray(profile_a), n_sample)
+    b = _resample_polygon(np.asarray(profile_b), n_sample)
+    return (1 - t) * a + t * b
+
+
+# =========================================================================
+# 7. taper_extrude
+# =========================================================================
+
+def taper_extrude(polygon_xy, height, scale_top=1.0, n_height=10):
+    """Extrude a 2D polygon with linear taper from bottom to top.
+
+    At the bottom (z=0) the profile is used as-is.  At the top (z=height)
+    it is scaled by *scale_top* relative to its centroid.
+
+    Args:
+        polygon_xy: list of (x, y) tuples
+        height:     extrusion height
+        scale_top:  scale factor at the top (1.0 = no taper)
+        n_height:   number of height divisions
+
+    Returns:
+        vertices: (N, 3), faces: (M, 3)
+    """
+    poly = np.asarray(polygon_xy, dtype=np.float64)
+    centroid = _polygon_centroid(poly)
+    n_pts = len(poly)
+
+    vertices = []
+    for i in range(n_height + 1):
+        frac = i / n_height
+        z = height * frac
+        scale = 1.0 + (scale_top - 1.0) * frac
+        for pt in poly:
+            scaled = centroid + (pt - centroid) * scale
+            vertices.append([scaled[0], scaled[1], z])
+
+    faces = []
+    for i in range(n_height):
+        for j in range(n_pts):
+            j_next = (j + 1) % n_pts
+            p00 = i * n_pts + j
+            p01 = i * n_pts + j_next
+            p10 = (i + 1) * n_pts + j
+            p11 = (i + 1) * n_pts + j_next
+            faces.append([p00, p10, p01])
+            faces.append([p01, p10, p11])
+
+    # Bottom cap
+    bot_cx, bot_cy = centroid
+    bot_center = len(vertices)
+    vertices.append([bot_cx, bot_cy, 0])
+    for j in range(n_pts):
+        j_next = (j + 1) % n_pts
+        faces.append([bot_center, j_next, j])
+
+    # Top cap
+    top_center = len(vertices)
+    top_cx = centroid[0]
+    top_cy = centroid[1]
+    vertices.append([top_cx, top_cy, height])
+    top_start = n_height * n_pts
+    for j in range(n_pts):
+        j_next = (j + 1) % n_pts
+        faces.append([top_center, top_start + j, top_start + j_next])
+
+    return np.array(vertices, dtype=np.float64), np.array(faces)
+
+
+# =========================================================================
+# 8. twist_extrude
+# =========================================================================
+
+def twist_extrude(polygon_xy, height, total_twist_deg=90.0, n_height=20):
+    """Extrude with progressive rotation (twist) along Z.
+
+    Args:
+        polygon_xy:      list of (x, y)
+        height:          extrusion height
+        total_twist_deg: total rotation in degrees from bottom to top
+        n_height:        height divisions
+
+    Returns:
+        vertices: (N, 3), faces: (M, 3)
+    """
+    poly = np.asarray(polygon_xy, dtype=np.float64)
+    centroid = _polygon_centroid(poly)
+    n_pts = len(poly)
+
+    vertices = []
+    for i in range(n_height + 1):
+        frac = i / n_height
+        z = height * frac
+        angle = math.radians(total_twist_deg * frac)
+        cos_a, sin_a = math.cos(angle), math.sin(angle)
+        for pt in poly:
+            dx, dy = pt[0] - centroid[0], pt[1] - centroid[1]
+            rx = centroid[0] + dx * cos_a - dy * sin_a
+            ry = centroid[1] + dx * sin_a + dy * cos_a
+            vertices.append([rx, ry, z])
+
+    faces = []
+    for i in range(n_height):
+        for j in range(n_pts):
+            j_next = (j + 1) % n_pts
+            p00 = i * n_pts + j
+            p01 = i * n_pts + j_next
+            p10 = (i + 1) * n_pts + j
+            p11 = (i + 1) * n_pts + j_next
+            faces.append([p00, p10, p01])
+            faces.append([p01, p10, p11])
+
+    # Bottom cap
+    bot_center = len(vertices)
+    vertices.append([centroid[0], centroid[1], 0])
+    for j in range(n_pts):
+        j_next = (j + 1) % n_pts
+        faces.append([bot_center, j_next, j])
+
+    # Top cap
+    top_center = len(vertices)
+    vertices.append([centroid[0], centroid[1], height])
+    top_start = n_height * n_pts
+    for j in range(n_pts):
+        j_next = (j + 1) % n_pts
+        faces.append([top_center, top_start + j, top_start + j_next])
+
+    return np.array(vertices, dtype=np.float64), np.array(faces)
+
+
+# =========================================================================
+# 9. boolean_union_profiles
+# =========================================================================
+
+def boolean_union_profiles(profile_a, profile_b):
+    """Approximate boolean union of two convex 2D profiles.
+
+    Returns the convex hull of the combined point sets.  For non-convex
+    inputs this is an outer approximation.
+
+    Args:
+        profile_a: (K, 2)
+        profile_b: (L, 2)
+
+    Returns:
+        union_polygon: (M, 2) ordered CCW
+    """
+    combined = np.vstack([np.asarray(profile_a), np.asarray(profile_b)])
+    if len(combined) < 3:
+        return combined
+    hull = ConvexHull(combined)
+    return combined[hull.vertices]
+
+
+# =========================================================================
+# 10. boolean_difference_profiles
+# =========================================================================
+
+def boolean_difference_profiles(outer_profile, inner_profile, n_sample=128):
+    """Approximate boolean difference: outer minus inner.
+
+    Points of the outer profile that fall inside the inner profile are
+    pushed outward to the inner boundary.  The result is the outer polygon
+    with a concavity carved where the inner profile overlaps.
+
+    For non-overlapping profiles the outer is returned unchanged.
+
+    Args:
+        outer_profile: (K, 2)
+        inner_profile: (L, 2)
+        n_sample:      resample count for the outer profile
+
+    Returns:
+        result_polygon: (M, 2)
+    """
+    outer = _resample_polygon(np.asarray(outer_profile), n_sample)
+    inner = np.asarray(inner_profile, dtype=np.float64)
+
+    if len(inner) < 3:
+        return outer
+
+    # Point-in-polygon test using winding number (simplified ray-casting)
+    inside_mask = _points_in_polygon(outer, inner)
+    if not np.any(inside_mask):
+        return outer
+
+    # For points inside the inner polygon, project them onto the inner
+    # boundary (nearest point on inner polygon edges)
+    result = outer.copy()
+    inner_closed = np.vstack([inner, inner[0:1]])
+    for i in np.where(inside_mask)[0]:
+        pt = outer[i]
+        best_dist = float("inf")
+        best_proj = pt.copy()
+        for j in range(len(inner)):
+            a = inner_closed[j]
+            b = inner_closed[j + 1]
+            proj = _project_point_segment(pt, a, b)
+            d = np.linalg.norm(pt - proj)
+            if d < best_dist:
+                best_dist = d
+                best_proj = proj
+        result[i] = best_proj
+
+    return result
+
+
+def _points_in_polygon(points, polygon):
+    """Ray-casting point-in-polygon test."""
+    pts = np.asarray(points)
+    poly = np.asarray(polygon)
+    n = len(poly)
+    inside = np.zeros(len(pts), dtype=bool)
+    for i in range(n):
+        j = (i + 1) % n
+        xi, yi = poly[i]
+        xj, yj = poly[j]
+        cond1 = (yi > pts[:, 1]) != (yj > pts[:, 1])
+        slope = (xj - xi) * (pts[:, 1] - yi) / (yj - yi + 1e-30) + xi
+        cond2 = pts[:, 0] < slope
+        inside ^= (cond1 & cond2)
+    return inside
+
+
+def _project_point_segment(p, a, b):
+    """Project point p onto segment a-b."""
+    ab = b - a
+    ap = p - a
+    t = np.dot(ap, ab) / (np.dot(ab, ab) + 1e-30)
+    t = max(0.0, min(1.0, t))
+    return a + t * ab
+
+
+# =========================================================================
+# 11. adaptive_extrude
+# =========================================================================
+
+def adaptive_extrude(vertices, faces, z_bottom, z_top, n_slices=10, n_profile=32):
+    """Build a mesh by sampling cross-sections from a target mesh at
+    multiple Z heights and lofting between them.
+
+    This adaptively reconstructs an extrude whose profile varies along Z
+    to match the target mesh geometry.
+
+    Args:
+        vertices:  (N, 3) target mesh vertices
+        faces:     (M, 3) target mesh faces
+        z_bottom:  starting Z
+        z_top:     ending Z
+        n_slices:  number of Z-slices to sample
+        n_profile: number of points per cross-section ring
+
+    Returns:
+        loft_vertices: (P, 3)
+        loft_faces:    (Q, 3)
+    """
+    z_values = np.linspace(z_bottom, z_top, n_slices)
+    rings = []
+
+    for z in z_values:
+        cs = extract_cross_section(vertices, faces, z)
+        if len(cs) < 3:
+            # Fallback: use nearby vertices projected to 2D
+            near = np.abs(vertices[:, 2] - z) < (z_top - z_bottom) / (2 * n_slices)
+            pts_2d = vertices[near, :2]
+            if len(pts_2d) < 3:
+                # Use a tiny circle as placeholder
+                t = np.linspace(0, 2 * math.pi, n_profile, endpoint=False)
+                ring = np.column_stack([0.01 * np.cos(t), 0.01 * np.sin(t)])
+            else:
+                ring = _resample_polygon(_order_polygon_ccw(pts_2d), n_profile)
+        else:
+            ring = _resample_polygon(_order_polygon_ccw(cs), n_profile)
+        rings.append(ring)
+
+    # Build loft mesh from rings
+    all_verts = []
+    all_faces = []
+    for si, (ring, z) in enumerate(zip(rings, z_values)):
+        for pt in ring:
+            all_verts.append([pt[0], pt[1], z])
+
+    for si in range(n_slices - 1):
+        for j in range(n_profile):
+            j_next = (j + 1) % n_profile
+            p00 = si * n_profile + j
+            p01 = si * n_profile + j_next
+            p10 = (si + 1) * n_profile + j
+            p11 = (si + 1) * n_profile + j_next
+            all_faces.append([p00, p01, p10])
+            all_faces.append([p01, p11, p10])
+
+    # Bottom cap
+    bot_center = len(all_verts)
+    bpts = np.array(all_verts[:n_profile])
+    all_verts.append([float(np.mean(bpts[:, 0])), float(np.mean(bpts[:, 1])), z_values[0]])
+    for j in range(n_profile):
+        j_next = (j + 1) % n_profile
+        all_faces.append([bot_center, j_next, j])
+
+    # Top cap
+    top_center = len(all_verts)
+    top_start = (n_slices - 1) * n_profile
+    tpts = np.array(all_verts[top_start:top_start + n_profile])
+    all_verts.append([float(np.mean(tpts[:, 0])), float(np.mean(tpts[:, 1])), z_values[-1]])
+    for j in range(n_profile):
+        j_next = (j + 1) % n_profile
+        all_faces.append([top_center, top_start + j, top_start + j_next])
+
+    return np.array(all_verts, dtype=np.float64), np.array(all_faces)
+
+
+# =========================================================================
+# 12. suggest_extrude_adjustments
+# =========================================================================
+
+def suggest_extrude_adjustments(cad_profile, mesh_vertices, mesh_faces,
+                                 z_bottom, z_top, n_slices=5):
+    """Analyze how a CAD extrude's profile compares to the corresponding
+    mesh region and suggest ranked adjustments.
+
+    Samples the mesh at several Z heights, compares each cross-section
+    to the CAD profile, and returns an ordered list of suggested
+    manipulations with parameters.
+
+    Args:
+        cad_profile:  (K, 2) the extrude's 2D polygon
+        mesh_vertices: (N, 3) target mesh
+        mesh_faces:    (M, 3) target mesh faces
+        z_bottom:      extrude start Z
+        z_top:         extrude end Z
+        n_slices:      number of Z-slices to compare
+
+    Returns:
+        list of dicts, each with:
+            action     — name of the suggested manipulation
+            priority   — lower is more important
+            params     — suggested parameters for the action
+            reason     — human-readable explanation
+    """
+    cad = np.asarray(cad_profile, dtype=np.float64)
+    suggestions = []
+
+    z_values = np.linspace(z_bottom, z_top, max(n_slices, 2))
+    slice_metrics = []
+    mesh_slices = []
+
+    for z in z_values:
+        cs = extract_cross_section(mesh_vertices, mesh_faces, z)
+        if len(cs) < 3:
+            continue
+        metrics = compare_cross_sections(cad, cs)
+        slice_metrics.append(metrics)
+        mesh_slices.append(cs)
+
+    if not slice_metrics:
+        return [{"action": "no_data", "priority": 0,
+                 "params": {}, "reason": "No valid cross-sections found in mesh"}]
+
+    # Aggregate metrics
+    avg_hausdorff = float(np.mean([m["hausdorff"] for m in slice_metrics]))
+    avg_mean_dist = float(np.mean([m["mean_dist"] for m in slice_metrics]))
+    avg_area_ratio = float(np.mean([m["area_ratio"] for m in slice_metrics]))
+    avg_iou = float(np.mean([m["iou"] for m in slice_metrics]))
+
+    # 1. Scale mismatch → offset_profile
+    if abs(avg_area_ratio - 1.0) > 0.1:
+        scale_factor = math.sqrt(avg_area_ratio)
+        cad_area = abs(_polygon_area_signed(cad))
+        approx_perimeter = math.sqrt(cad_area) * 4  # rough
+        offset_dist = (scale_factor - 1.0) * math.sqrt(cad_area / math.pi)
+        suggestions.append({
+            "action": "offset_profile",
+            "priority": 1,
+            "params": {"distance": round(offset_dist, 4)},
+            "reason": f"Area ratio {avg_area_ratio:.2f} — profile needs "
+                      f"{'expanding' if avg_area_ratio < 1 else 'shrinking'}",
+        })
+
+    # 2. Shape mismatch → fit_primitive
+    if avg_mean_dist > 0.5:
+        if mesh_slices:
+            mid = mesh_slices[len(mesh_slices) // 2]
+            fit = fit_primitive_to_cross_section(mid)
+            suggestions.append({
+                "action": "fit_primitive_to_cross_section",
+                "priority": 2,
+                "params": {"best_fit": fit["best"], "fit_params": fit["params"]},
+                "reason": f"Mean distance {avg_mean_dist:.2f} — try {fit['best']} shape",
+            })
+
+    # 3. Taper detection → taper_extrude
+    if len(slice_metrics) >= 2:
+        first_area = abs(_polygon_area_signed(
+            _resample_polygon(mesh_slices[0], 64))) if len(mesh_slices[0]) >= 3 else 0
+        last_area = abs(_polygon_area_signed(
+            _resample_polygon(mesh_slices[-1], 64))) if len(mesh_slices[-1]) >= 3 else 0
+        if first_area > 1e-6 and last_area > 1e-6:
+            taper_ratio = math.sqrt(last_area / first_area)
+            if abs(taper_ratio - 1.0) > 0.05:
+                suggestions.append({
+                    "action": "taper_extrude",
+                    "priority": 3,
+                    "params": {"scale_top": round(taper_ratio, 4)},
+                    "reason": f"Cross-section area changes bottom→top "
+                              f"(ratio {taper_ratio:.2f})",
+                })
+
+    # 4. Twist detection
+    if len(mesh_slices) >= 2:
+        c0 = _polygon_centroid(mesh_slices[0])
+        angles_bottom = np.arctan2(mesh_slices[0][:, 1] - c0[1],
+                                    mesh_slices[0][:, 0] - c0[0])
+        c_last = _polygon_centroid(mesh_slices[-1])
+        angles_top = np.arctan2(mesh_slices[-1][:, 1] - c_last[1],
+                                 mesh_slices[-1][:, 0] - c_last[0])
+        # Compare mean angle offsets (approximate twist)
+        mean_angle_diff = float(np.mean(angles_top)) - float(np.mean(angles_bottom))
+        twist_deg = math.degrees(mean_angle_diff)
+        if abs(twist_deg) > 3.0:
+            suggestions.append({
+                "action": "twist_extrude",
+                "priority": 4,
+                "params": {"total_twist_deg": round(twist_deg, 2)},
+                "reason": f"Detected ~{twist_deg:.1f}° angular shift bottom→top",
+            })
+
+    # 5. Ellipse fit if circle doesn't fit well
+    if mesh_slices:
+        mid = mesh_slices[len(mesh_slices) // 2]
+        ell = fit_ellipse_to_cross_section(mid)
+        a, b = ell["semi_axes"]
+        eccentricity = abs(a - b) / max(a, b) if max(a, b) > 1e-6 else 0
+        if eccentricity > 0.15:
+            suggestions.append({
+                "action": "fit_ellipse",
+                "priority": 5,
+                "params": ell,
+                "reason": f"Elliptical cross-section (eccentricity {eccentricity:.2f})",
+            })
+
+    # 6. Spline fit for non-primitive shapes
+    if avg_mean_dist > 1.0:
+        suggestions.append({
+            "action": "fit_spline_profile",
+            "priority": 6,
+            "params": {"n_control": min(len(mesh_slices[0]), 24) if mesh_slices else 12},
+            "reason": f"High mean distance ({avg_mean_dist:.2f}) — try spline contour",
+        })
+
+    # 7. Adaptive extrude as last resort
+    if avg_iou < 0.7:
+        suggestions.append({
+            "action": "adaptive_extrude",
+            "priority": 7,
+            "params": {"n_slices": n_slices * 2, "z_bottom": z_bottom, "z_top": z_top},
+            "reason": f"Low IoU ({avg_iou:.2f}) — rebuild extrude adaptively",
+        })
+
+    # 8. Blend profiles if cross-sections vary
+    if len(mesh_slices) >= 2:
+        vary = np.std([abs(_polygon_area_signed(_resample_polygon(s, 32)))
+                       for s in mesh_slices if len(s) >= 3])
+        if vary > 0.5:
+            suggestions.append({
+                "action": "blend_profiles",
+                "priority": 8,
+                "params": {"n_slices": len(mesh_slices)},
+                "reason": f"Cross-section area varies (std={vary:.2f}) — use blended loft",
+            })
+
+    # 9. Boolean union if mesh has protrusions
+    if avg_hausdorff > 2.0 and avg_area_ratio < 1.0:
+        suggestions.append({
+            "action": "boolean_union_profiles",
+            "priority": 9,
+            "params": {},
+            "reason": "Mesh extends beyond CAD profile — add material via union",
+        })
+
+    # 10. Boolean difference if mesh has indentations
+    if avg_hausdorff > 2.0 and avg_area_ratio > 1.0:
+        suggestions.append({
+            "action": "boolean_difference_profiles",
+            "priority": 10,
+            "params": {},
+            "reason": "CAD extends beyond mesh — remove material via difference",
+        })
+
+    suggestions.sort(key=lambda s: s["priority"])
+    return suggestions
+
+
+# =========================================================================
+# Convenience: fit_spline_profile (referenced by suggestions)
+# =========================================================================
+
+def fit_spline_profile(points, n_control=16, n_output=64):
+    """Fit a smooth closed cubic spline to a 2D point cloud.
+
+    Args:
+        points:    (K, 2) unordered or ordered 2D points
+        n_control: number of control points to retain
+        n_output:  output polygon resolution
+
+    Returns:
+        polygon: (n_output, 2) smooth spline contour
+    """
+    pts = _order_polygon_ccw(np.asarray(points, dtype=np.float64))
+    if len(pts) < 4:
+        return pts
+
+    # Subsample to n_control points
+    control = _resample_polygon(pts, n_control)
+
+    # Parameterize by arc length
+    diffs = np.diff(control, axis=0)
+    seg_lens = np.linalg.norm(diffs, axis=1)
+    # Add closing segment length
+    close_len = np.linalg.norm(control[0] - control[-1])
+    all_lens = np.append(seg_lens, close_len)
+    cum = np.concatenate([[0], np.cumsum(all_lens)])
+    total = cum[-1]
+    if total < 1e-12:
+        return control
+
+    t_ctrl = cum[:-1] / total  # parameter for each control point (0..1 exclusive)
+
+    # For periodic spline, we need t strictly increasing and values that
+    # match at t=0 and t=1.  Extend with the wrap-around point.
+    t_ext = np.append(t_ctrl, 1.0)
+    t_out = np.linspace(0, 1, n_output, endpoint=False)
+
+    result = np.zeros((n_output, 2))
+    for dim in range(2):
+        vals = np.append(control[:, dim], control[0, dim])
+        cs = CubicSpline(t_ext, vals, bc_type="periodic")
+        result[:, dim] = cs(t_out)
+
+    return result
