@@ -368,7 +368,7 @@ Write-Host "Activate it with:"
 Write-Host "  .\.venv\Scripts\Activate.ps1"
 Write-Host ""
 Write-Host "Run tests:"
-Write-Host '  pytest tests\'
+Write-Host "  pytest tests/"
 Write-Host ""
 Write-Host "CLI usage:"
 Write-Host '  python -m meshxcad.cli transfer --plain model.step --detail scan.stl --output result.stl'
