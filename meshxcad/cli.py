@@ -30,10 +30,7 @@ def _render_comparison_image(plain_verts, plain_faces,
                               detail_verts, detail_faces,
                               result_verts, result_faces,
                               output_path):
-    """Render a 3-panel comparison image: Plain CAD | Detail Mesh | Result.
-
-    The image is saved next to the output file with a _comparison.png suffix.
-    """
+    """Render a 3-panel comparison image: Plain CAD | Detail Mesh | Result."""
     from .render import render_comparison, HAS_MPL
 
     if not HAS_MPL:
@@ -54,35 +51,214 @@ def _render_comparison_image(plain_verts, plain_faces,
                       title="MeshXCAD Detail Transfer Comparison")
 
 
-def cmd_transfer(args):
-    """Run detail transfer from a detailed mesh onto a plain CAD model."""
-    plain_path = args.plain
-    detail_path = args.detail
-    output_path = args.output
-    output_ext = os.path.splitext(output_path)[1].lower()
+def _load_detail_mesh(detail_path):
+    """Load a detail mesh from any supported format."""
+    ext = os.path.splitext(detail_path)[1].lower()
+    if ext == ".stl":
+        from .stl_io import read_binary_stl
+        return read_binary_stl(detail_path)
+    else:
+        from . import mesh_io
+        fc_mesh = mesh_io.load_mesh(detail_path)
+        return mesh_io.mesh_to_numpy(fc_mesh)
 
-    plain_ext = os.path.splitext(plain_path)[1].lower()
-    detail_ext = os.path.splitext(detail_path)[1].lower()
 
-    # Determine which direction: mesh->CAD or CAD->mesh
+def _load_plain_mesh(plain_path, deflection=0.05):
+    """Load a plain model as vertices/faces, tessellating CAD if needed."""
+    ext = os.path.splitext(plain_path)[1].lower()
     cad_exts = {".step", ".stp", ".iges", ".igs", ".fcstd"}
     mesh_exts = {".stl", ".obj", ".ply"}
 
+    if ext in cad_exts:
+        from . import cad_io, mesh_io
+        doc = cad_io.load_cad(plain_path)
+        shape = cad_io.cad_to_shape(doc)
+        fc_mesh = cad_io.shape_to_mesh(shape, linear_deflection=deflection)
+        verts, faces = mesh_io.mesh_to_numpy(fc_mesh)
+        cad_io.close_document(doc)
+        return verts, faces
+    elif ext in mesh_exts:
+        from .stl_io import read_binary_stl
+        return read_binary_stl(plain_path)
+    else:
+        raise ValueError(f"Unsupported plain model format: {ext}")
+
+
+def cmd_transfer(args):
+    """Run detail transfer from a detailed mesh onto a plain CAD model.
+
+    Default behaviour is iterative: the result is fed back as input
+    until convergence.  Use --single-pass for legacy one-shot mode.
+    When --plain is omitted, an initial shape is auto-reconstructed
+    from the detail mesh (scratch-start mode).
+    """
+    detail_path = args.detail
+    output_path = args.output
+    output_ext = os.path.splitext(output_path)[1].lower()
+    render = not args.no_render
+
+    # --- Load detail mesh (always needed) ---
+    print(f"Loading detail mesh: {detail_path}")
+    detail_verts, detail_faces = _load_detail_mesh(detail_path)
+    print(f"  Loaded: {len(detail_verts)} vertices, {len(detail_faces)} faces")
+
+    # --- Scratch-start mode (no --plain) ---
+    if args.plain is None:
+        _transfer_scratch(detail_verts, detail_faces, output_path, args, render)
+        return
+
+    plain_path = args.plain
+    plain_ext = os.path.splitext(plain_path)[1].lower()
+    detail_ext = os.path.splitext(detail_path)[1].lower()
+
+    cad_exts = {".step", ".stp", ".iges", ".igs", ".fcstd"}
+    mesh_exts = {".stl", ".obj", ".ply"}
     plain_is_cad = plain_ext in cad_exts
     detail_is_mesh = detail_ext in mesh_exts
 
-    # STEP B-rep output: use the brep_transfer pipeline
+    # STEP B-rep output: use the brep_transfer pipeline (single-pass only)
     if output_ext in (".step", ".stp") and plain_is_cad and detail_is_mesh:
         _transfer_to_step_brep(plain_path, detail_path, output_path, args)
-    elif plain_is_cad and detail_is_mesh:
-        _transfer_mesh_detail_to_cad(plain_path, detail_path, output_path, args)
-    elif plain_ext in mesh_exts and detail_ext in mesh_exts:
-        _transfer_mesh_to_mesh(plain_path, detail_path, output_path, args)
+        return
+
+    # --- Load plain model ---
+    print(f"Loading plain model: {plain_path}")
+    plain_verts, plain_faces = _load_plain_mesh(plain_path, args.deflection)
+    print(f"  Loaded/tessellated: {len(plain_verts)} vertices, {len(plain_faces)} faces")
+
+    _print_diagnostics(plain_verts, detail_verts)
+
+    # --- Single-pass or iterative ---
+    if args.single_pass:
+        _transfer_single_pass(plain_verts, plain_faces,
+                              detail_verts, detail_faces,
+                              output_path, args, render)
     else:
-        print(f"Error: unsupported file combination: {plain_ext} + {detail_ext}")
-        print("Supported: plain=.step/.stp/.fcstd + detail=.stl")
-        print("       or: plain=.stl + detail=.stl")
-        sys.exit(1)
+        _transfer_iterative(plain_verts, plain_faces,
+                            detail_verts, detail_faces,
+                            output_path, args, render)
+
+
+def _transfer_scratch(detail_verts, detail_faces, output_path, args, render):
+    """Scratch-start: reconstruct initial shape, then iterate."""
+    from .iterative_transfer import scratch_transfer
+
+    base, _ = os.path.splitext(output_path)
+    output_dir = base + "_iterations" if render else None
+
+    t0 = time.time()
+    result = scratch_transfer(
+        detail_verts, detail_faces,
+        max_iterations=args.max_iterations,
+        min_improvement=args.min_improvement,
+        patience=args.patience,
+        use_vision=args.use_vision,
+        vision_model=args.vision_model,
+        output_dir=output_dir,
+        render=render,
+    )
+    elapsed = time.time() - t0
+
+    print(f"\nScratch-start complete in {elapsed:.2f}s")
+    print(f"  Initial shape: {result['initial_shape_type']} "
+          f"(quality={result['initial_quality']:.4f})")
+    print(f"  Iterations: {result['iterations']}")
+    print(f"  Final mean distance: {result['distances'][-1]:.6f}")
+    print(f"  Converged: {result['converged']}")
+
+    _save_output(result["result_verts"], result["result_faces"], output_path)
+    print(f"Saved: {output_path}")
+
+    if render:
+        _render_comparison_image(
+            result["result_verts"], result["result_faces"],  # use final as "plain" panel
+            detail_verts, detail_faces,
+            result["result_verts"], result["result_faces"],
+            output_path,
+        )
+
+
+def _transfer_iterative(plain_verts, plain_faces,
+                          detail_verts, detail_faces,
+                          output_path, args, render):
+    """Default iterative transfer with convergence detection."""
+    from .iterative_transfer import iterative_transfer
+    import numpy as np
+
+    base, _ = os.path.splitext(output_path)
+    output_dir = base + "_iterations" if render else None
+
+    print("Starting iterative detail transfer...")
+    t0 = time.time()
+    result = iterative_transfer(
+        plain_verts, plain_faces,
+        detail_verts, detail_faces,
+        max_iterations=args.max_iterations,
+        min_improvement=args.min_improvement,
+        patience=args.patience,
+        use_vision=args.use_vision,
+        vision_model=args.vision_model,
+        output_dir=output_dir,
+        render=render,
+    )
+    elapsed = time.time() - t0
+
+    # Summary
+    from .alignment import find_correspondences
+    _, _, bd = find_correspondences(plain_verts, detail_verts)
+    bm = float(np.mean(bd))
+    final_dist = result["distances"][-1]
+    if bm > 0:
+        imp = (1 - final_dist / bm) * 100
+        print(f"\nIterative transfer complete in {elapsed:.2f}s")
+        print(f"  Iterations: {result['iterations']}")
+        print(f"  Distance: {bm:.4f} -> {final_dist:.4f} ({imp:.1f}% improvement)")
+        print(f"  Converged: {result['converged']}")
+    else:
+        print(f"\nIterative transfer complete in {elapsed:.2f}s "
+              f"({result['iterations']} iterations)")
+
+    _save_output(result["result_verts"], result["result_faces"], output_path)
+    print(f"Saved: {output_path}")
+
+    if render:
+        _render_comparison_image(plain_verts, plain_faces,
+                                 detail_verts, detail_faces,
+                                 result["result_verts"], result["result_faces"],
+                                 output_path)
+
+
+def _transfer_single_pass(plain_verts, plain_faces,
+                           detail_verts, detail_faces,
+                           output_path, args, render):
+    """Legacy single-pass transfer (no iteration)."""
+    from . import detail_transfer
+    from .alignment import find_correspondences
+    import numpy as np
+
+    print("Transferring detail (single pass, with pre-alignment)...")
+    t0 = time.time()
+    result_verts = detail_transfer.transfer_mesh_detail_to_mesh(
+        plain_verts, plain_faces, detail_verts, detail_faces
+    )
+    elapsed = time.time() - t0
+    print(f"  Done in {elapsed:.2f}s")
+
+    _, _, bd = find_correspondences(plain_verts, detail_verts)
+    _, _, rd = find_correspondences(result_verts, detail_verts)
+    bm, rm = float(np.mean(bd)), float(np.mean(rd))
+    if bm > 0:
+        imp = (1 - rm / bm) * 100
+        print(f"  Distance: {bm:.4f} -> {rm:.4f} ({imp:.1f}% improvement)")
+
+    _save_output(result_verts, plain_faces, output_path)
+    print(f"Saved: {output_path}")
+
+    if render:
+        _render_comparison_image(plain_verts, plain_faces,
+                                 detail_verts, detail_faces,
+                                 result_verts, plain_faces,
+                                 output_path)
 
 
 def _transfer_to_step_brep(plain_cad_path, detail_mesh_path, output_path, args):
@@ -94,7 +270,6 @@ def _transfer_to_step_brep(plain_cad_path, detail_mesh_path, output_path, args):
     print(f"Loading plain CAD: {plain_cad_path}")
     print(f"Loading detail mesh: {detail_mesh_path}")
 
-    # Keep meshes for comparison rendering
     plain_verts, plain_faces = read_step(plain_cad_path,
                                           linear_deflection=args.deflection)
     detail_verts, detail_faces = read_binary_stl(detail_mesh_path)
@@ -112,116 +287,17 @@ def _transfer_to_step_brep(plain_cad_path, detail_mesh_path, output_path, args):
     print(f"  Done in {elapsed:.2f}s — {result['n_operations']} B-rep operations applied")
     print(f"Saved STEP B-rep: {output_path}")
 
-    # Render comparison
     if not args.no_render:
-        # Tessellate the result STEP for rendering
         try:
             result_shape = _read_step_shape(output_path)
             result_verts, result_faces = _tessellate_shape(
                 result_shape, args.deflection, 0.5)
         except Exception:
-            # If re-reading fails, use displaced plain mesh as fallback
             result_verts, result_faces = plain_verts, plain_faces
 
         _render_comparison_image(plain_verts, plain_faces,
                                  detail_verts, detail_faces,
                                  result_verts, result_faces,
-                                 output_path)
-
-
-def _transfer_mesh_detail_to_cad(plain_cad_path, detail_mesh_path, output_path, args):
-    """Transfer detail from STL mesh onto a STEP/CAD model."""
-    from . import cad_io, mesh_io, detail_transfer
-    from .stl_io import read_binary_stl
-    import numpy as np
-
-    print(f"Loading plain CAD: {plain_cad_path}")
-    doc = cad_io.load_cad(plain_cad_path)
-    shape = cad_io.cad_to_shape(doc)
-    plain_fc_mesh = cad_io.shape_to_mesh(
-        shape, linear_deflection=args.deflection
-    )
-    plain_verts, plain_faces = mesh_io.mesh_to_numpy(plain_fc_mesh)
-    cad_io.close_document(doc)
-    print(f"  Tessellated: {len(plain_verts)} vertices, {len(plain_faces)} faces")
-
-    print(f"Loading detail mesh: {detail_mesh_path}")
-    detail_ext = os.path.splitext(detail_mesh_path)[1].lower()
-    if detail_ext == ".stl":
-        detail_verts, detail_faces = read_binary_stl(detail_mesh_path)
-    else:
-        detail_fc_mesh = mesh_io.load_mesh(detail_mesh_path)
-        detail_verts, detail_faces = mesh_io.mesh_to_numpy(detail_fc_mesh)
-    print(f"  Loaded: {len(detail_verts)} vertices, {len(detail_faces)} faces")
-
-    _print_diagnostics(plain_verts, detail_verts)
-
-    print("Transferring detail (with pre-alignment)...")
-    t0 = time.time()
-    result_verts = detail_transfer.transfer_mesh_detail_to_mesh(
-        plain_verts, plain_faces, detail_verts, detail_faces
-    )
-    elapsed = time.time() - t0
-    print(f"  Done in {elapsed:.2f}s")
-
-    # Compute improvement metric
-    from .alignment import find_correspondences
-    _, _, bd = find_correspondences(plain_verts, detail_verts)
-    _, _, rd = find_correspondences(result_verts, detail_verts)
-    bm, rm = float(np.mean(bd)), float(np.mean(rd))
-    if bm > 0:
-        imp = (1 - rm / bm) * 100
-        print(f"  Distance: {bm:.4f} -> {rm:.4f} ({imp:.1f}% improvement)")
-
-    _save_output(result_verts, plain_faces, output_path)
-    print(f"Saved: {output_path}")
-
-    if not args.no_render:
-        _render_comparison_image(plain_verts, plain_faces,
-                                 detail_verts, detail_faces,
-                                 result_verts, plain_faces,
-                                 output_path)
-
-
-def _transfer_mesh_to_mesh(plain_path, detail_path, output_path, args):
-    """Transfer detail between two STL meshes."""
-    from .stl_io import read_binary_stl
-    from . import detail_transfer
-    import numpy as np
-
-    print(f"Loading plain mesh: {plain_path}")
-    plain_verts, plain_faces = read_binary_stl(plain_path)
-    print(f"  Loaded: {len(plain_verts)} vertices, {len(plain_faces)} faces")
-
-    print(f"Loading detail mesh: {detail_path}")
-    detail_verts, detail_faces = read_binary_stl(detail_path)
-    print(f"  Loaded: {len(detail_verts)} vertices, {len(detail_faces)} faces")
-
-    _print_diagnostics(plain_verts, detail_verts)
-
-    print("Transferring detail (with pre-alignment)...")
-    t0 = time.time()
-    result_verts = detail_transfer.transfer_mesh_detail_to_mesh(
-        plain_verts, plain_faces, detail_verts, detail_faces
-    )
-    elapsed = time.time() - t0
-    print(f"  Done in {elapsed:.2f}s")
-
-    from .alignment import find_correspondences
-    _, _, bd = find_correspondences(plain_verts, detail_verts)
-    _, _, rd = find_correspondences(result_verts, detail_verts)
-    bm, rm = float(np.mean(bd)), float(np.mean(rd))
-    if bm > 0:
-        imp = (1 - rm / bm) * 100
-        print(f"  Distance: {bm:.4f} -> {rm:.4f} ({imp:.1f}% improvement)")
-
-    _save_output(result_verts, plain_faces, output_path)
-    print(f"Saved: {output_path}")
-
-    if not args.no_render:
-        _render_comparison_image(plain_verts, plain_faces,
-                                 detail_verts, detail_faces,
-                                 result_verts, plain_faces,
                                  output_path)
 
 
@@ -262,8 +338,10 @@ def main():
         help="Transfer detail from a detailed mesh onto a plain model",
     )
     p_transfer.add_argument(
-        "--plain", required=True,
-        help="Path to the plain model (.step, .stp, .fcstd, or .stl)",
+        "--plain", default=None,
+        help="Path to the plain model (.step, .stp, .fcstd, or .stl). "
+             "If omitted, an initial shape is auto-reconstructed from the "
+             "detail mesh (scratch-start mode).",
     )
     p_transfer.add_argument(
         "--detail", required=True,
@@ -279,8 +357,39 @@ def main():
     )
     p_transfer.add_argument(
         "--no-render", action="store_true", default=False,
-        help="Skip generating the comparison image",
+        help="Skip generating comparison images",
     )
+
+    # Iteration control
+    p_transfer.add_argument(
+        "--single-pass", action="store_true", default=False,
+        help="Disable iterative refinement (legacy single-pass mode)",
+    )
+    p_transfer.add_argument(
+        "--max-iterations", type=int, default=20,
+        help="Maximum number of refinement iterations (default: 20)",
+    )
+    p_transfer.add_argument(
+        "--min-improvement", type=float, default=0.001,
+        help="Minimum fractional improvement to continue iterating (default: 0.001)",
+    )
+    p_transfer.add_argument(
+        "--patience", type=int, default=3,
+        help="Stop after this many iterations with no improvement (default: 3)",
+    )
+
+    # Vision LLM guidance
+    p_transfer.add_argument(
+        "--use-vision", action="store_true", default=False,
+        help="Use a vision LLM to guide iterative refinement. "
+             "Requires LOCAL_OPENAI_KEY and LOCAL_OPENAI_URL env vars.",
+    )
+    p_transfer.add_argument(
+        "--vision-model", type=str, default=None,
+        help="Model name for the vision LLM (default: from LOCAL_OPENAI_MODEL "
+             "env var, or 'gpt-4o')",
+    )
+
     p_transfer.set_defaults(func=cmd_transfer)
 
     args = parser.parse_args()
