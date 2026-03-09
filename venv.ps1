@@ -71,28 +71,88 @@ Write-Host "Installing OpenCASCADE Python bindings ..."
 pip install cadquery
 
 # ---------- FreeCAD ----------
+# FreeCAD cannot be installed via pip. Its Python modules are compiled against a
+# specific Python version (often 3.11), so "import FreeCAD" only works when the
+# interpreter version matches. We detect FreeCAD by looking for common install
+# directories instead.
 Write-Host ""
 Write-Host "--- FreeCAD (optional) ---" -ForegroundColor Yellow
-$FreecadAvailable = $false
-try {
-    & $Python -c "import FreeCAD" 2>$null
-    $FreecadAvailable = $true
-} catch {}
+$FreecadFound = $false
+$FreecadLib = ""
 
-if ($FreecadAvailable) {
-    Write-Host "FreeCAD is already importable — skipping."
+# Check common Windows install locations
+$SearchDirs = @(
+    "${env:ProgramFiles}\FreeCAD *\bin",
+    "${env:ProgramFiles}\FreeCAD *\lib",
+    "${env:LOCALAPPDATA}\FreeCAD *\bin",
+    "${env:LOCALAPPDATA}\FreeCAD *\lib",
+    "${env:ProgramFiles(x86)}\FreeCAD *\bin"
+)
+foreach ($pattern in $SearchDirs) {
+    $matches = Resolve-Path -Path $pattern -ErrorAction SilentlyContinue
+    if ($matches) {
+        $FreecadFound = $true
+        # Prefer the bin directory (contains FreeCAD.pyd on Windows)
+        foreach ($m in $matches) {
+            if ($m.Path -match "\\bin$") {
+                $FreecadLib = $m.Path
+                break
+            }
+        }
+        if (-not $FreecadLib) {
+            $FreecadLib = $matches[0].Path
+        }
+        break
+    }
+}
+
+# Also check if freecad is on PATH
+if (-not $FreecadFound) {
+    try {
+        $fc = Get-Command freecad -ErrorAction SilentlyContinue
+        if ($fc) { $FreecadFound = $true }
+    } catch {}
+}
+
+# Last resort: try import (works only if venv Python version matches FreeCAD's)
+if (-not $FreecadFound) {
+    try {
+        & python -c "import FreeCAD" 2>$null
+        if ($LASTEXITCODE -eq 0) { $FreecadFound = $true }
+    } catch {}
+}
+
+if ($FreecadFound) {
+    Write-Host "FreeCAD detected."
+    if ($FreecadLib) {
+        Write-Host "  Library path: $FreecadLib"
+        Write-Host ""
+        Write-Host "  To make FreeCAD importable from this venv, set PYTHONPATH before activating:"
+        Write-Host "    `$env:PYTHONPATH = `"$FreecadLib;`$env:PYTHONPATH`""
+        Write-Host ""
+        Write-Host "  NOTE: FreeCAD's Python modules are compiled against a specific Python"
+        Write-Host "  version. If your venv Python ($PyVersion) does not match, you will get"
+        Write-Host "  import errors. In that case, install a matching Python version or use conda:"
+        Write-Host "    conda install -c conda-forge freecad python=$PyVersion"
+    }
 } else {
-    Write-Host "FreeCAD is NOT installed in this environment."
+    Write-Host "FreeCAD is NOT installed."
     Write-Host "Some features (parametric CAD generation, .FCStd I/O) require FreeCAD."
     Write-Host ""
     Write-Host "Install FreeCAD on Windows:"
     Write-Host "  1. Download from https://www.freecad.org/downloads.php"
-    Write-Host "  2. Install, then add FreeCAD's lib and bin to PYTHONPATH:"
-    Write-Host '     $env:PYTHONPATH = "C:\Program Files\FreeCAD 0.21\bin;C:\Program Files\FreeCAD 0.21\lib;$env:PYTHONPATH"'
-    Write-Host "  Adjust the path to match your FreeCAD install location."
+    Write-Host "  2. Install, then add FreeCAD's bin dir to PYTHONPATH:"
+    Write-Host '     $env:PYTHONPATH = "C:\Program Files\FreeCAD 1.0\bin;$env:PYTHONPATH"'
+    Write-Host "     (Adjust the path to match your FreeCAD install location.)"
     Write-Host ""
     Write-Host "Alternatively, install via conda:"
     Write-Host "  conda install -c conda-forge freecad"
+    Write-Host ""
+    Write-Host "NOTE: FreeCAD's Python modules are compiled against a specific Python"
+    Write-Host "version. Your venv uses Python $PyVersion. If FreeCAD was built against"
+    Write-Host "a different version, 'import FreeCAD' will fail even with the correct"
+    Write-Host "PYTHONPATH. Use conda to get a matching set:"
+    Write-Host "  conda install -c conda-forge freecad python=$PyVersion"
 }
 
 # ---------- testing ----------
