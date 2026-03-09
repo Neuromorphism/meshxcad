@@ -479,3 +479,71 @@ class TestFitSplineProfile:
         radii = np.linalg.norm(result, axis=1)
         assert np.mean(radii) > 3.0
         assert np.mean(radii) < 8.0
+
+
+# =========================================================================
+# Round 2 extrude/sweep differentiators and fixers
+# =========================================================================
+
+class TestTaperConsistencyDiff:
+    def test_identical_is_small(self):
+        from meshxcad.extrude_align import taper_consistency_diff
+        v, f = make_cylinder_mesh(radius=5.0, height=10.0,
+                                   radial_divs=20, height_divs=10)
+        assert taper_consistency_diff(v, f, v, f) < 5.0
+
+
+class TestSweepPathDeviation:
+    def test_identical_is_small(self):
+        from meshxcad.extrude_align import sweep_path_deviation
+        v, f = make_cylinder_mesh(radius=5.0, height=10.0,
+                                   radial_divs=20, height_divs=10)
+        assert sweep_path_deviation(v, f, v, f) < 5.0
+
+
+class TestProfileCircularityDiff:
+    def test_identical_is_small(self):
+        from meshxcad.extrude_align import profile_circularity_diff
+        v, f = make_cylinder_mesh(radius=5.0, height=10.0,
+                                   radial_divs=20, height_divs=10)
+        assert profile_circularity_diff(v, f, v, f) < 5.0
+
+
+class TestExtrudeTwistDiff:
+    def test_identical_is_small(self):
+        from meshxcad.extrude_align import extrude_twist_diff
+        v, f = make_cylinder_mesh(radius=5.0, height=10.0,
+                                   radial_divs=20, height_divs=10)
+        assert extrude_twist_diff(v, f, v, f) < 5.0
+
+
+class TestRound2ExtrudeFixers:
+    def _make_pair(self):
+        v, f = make_cylinder_mesh(radius=5.0, height=10.0,
+                                   radial_divs=20, height_divs=10)
+        v2 = v * 1.2 + 0.5
+        return v2, f, v, f
+
+    def test_fix_taper_consistency(self):
+        from meshxcad.extrude_align import fix_taper_consistency
+        cad_v, cad_f, mesh_v, mesh_f = self._make_pair()
+        result = fix_taper_consistency(cad_v, cad_f, mesh_v, mesh_f)
+        assert result.shape == cad_v.shape
+
+    def test_fix_sweep_path_deviation(self):
+        from meshxcad.extrude_align import fix_sweep_path_deviation
+        cad_v, cad_f, mesh_v, mesh_f = self._make_pair()
+        result = fix_sweep_path_deviation(cad_v, cad_f, mesh_v, mesh_f)
+        assert result.shape == cad_v.shape
+
+    def test_fix_profile_circularity(self):
+        from meshxcad.extrude_align import fix_profile_circularity
+        cad_v, cad_f, mesh_v, mesh_f = self._make_pair()
+        result = fix_profile_circularity(cad_v, cad_f, mesh_v, mesh_f)
+        assert result.shape == cad_v.shape
+
+    def test_fix_extrude_twist(self):
+        from meshxcad.extrude_align import fix_extrude_twist
+        cad_v, cad_f, mesh_v, mesh_f = self._make_pair()
+        result = fix_extrude_twist(cad_v, cad_f, mesh_v, mesh_f)
+        assert result.shape == cad_v.shape

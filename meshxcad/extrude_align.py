@@ -996,3 +996,958 @@ def fit_spline_profile(points, n_control=16, n_output=64):
         result[:, dim] = cs(t_out)
 
     return result
+
+
+# =========================================================================
+# Differentiators (moved from adversarial_loop for standard reuse)
+# =========================================================================
+
+def _convex_hull_area(points_2d):
+    """Approximate convex hull area of 2D points."""
+    if len(points_2d) < 3:
+        return 0.0
+    c = points_2d.mean(axis=0)
+    angles = np.arctan2(points_2d[:, 1] - c[1], points_2d[:, 0] - c[0])
+    order = np.argsort(angles)
+    pts = points_2d[order]
+    n = len(pts)
+    area = 0.0
+    for i in range(n):
+        j = (i + 1) % n
+        area += pts[i, 0] * pts[j, 1] - pts[j, 0] * pts[i, 1]
+    return abs(area) / 2
+
+
+def cross_section_contour_diff(cad_v, cad_f, mesh_v, mesh_f, n_slices=10):
+    """Compare cross-section contour areas at multiple Z heights."""
+    cad_v, mesh_v = np.asarray(cad_v), np.asarray(mesh_v)
+    z_min = max(cad_v[:, 2].min(), mesh_v[:, 2].min())
+    z_max = min(cad_v[:, 2].max(), mesh_v[:, 2].max())
+    if z_max <= z_min:
+        return 0.0
+    z_vals = np.linspace(z_min + 0.05 * (z_max - z_min),
+                          z_max - 0.05 * (z_max - z_min), n_slices)
+
+    total_diff = 0.0
+    for z in z_vals:
+        tol = (z_max - z_min) / (n_slices * 2)
+        cad_near = cad_v[np.abs(cad_v[:, 2] - z) < tol]
+        mesh_near = mesh_v[np.abs(mesh_v[:, 2] - z) < tol]
+        if len(cad_near) < 3 or len(mesh_near) < 3:
+            continue
+        cad_2d = cad_near[:, :2]
+        mesh_2d = mesh_near[:, :2]
+        cad_area = _convex_hull_area(cad_2d)
+        mesh_area = _convex_hull_area(mesh_2d)
+        total = cad_area + mesh_area
+        if total > 1e-6:
+            total_diff += abs(cad_area - mesh_area) / total
+    return float(total_diff / n_slices * 100)
+
+
+def z_profile_area_diff(cad_v, cad_f, mesh_v, mesh_f, n_slices=20):
+    """Compare total cross-sectional 'area' at each Z height using vertex spread."""
+    cad_v, mesh_v = np.asarray(cad_v), np.asarray(mesh_v)
+    z_min = max(cad_v[:, 2].min(), mesh_v[:, 2].min())
+    z_max = min(cad_v[:, 2].max(), mesh_v[:, 2].max())
+    if z_max <= z_min:
+        return 0.0
+
+    z_vals = np.linspace(z_min, z_max, n_slices + 2)[1:-1]
+    tol = (z_max - z_min) / (n_slices * 2)
+    total_diff = 0.0
+
+    for z in z_vals:
+        cad_near = cad_v[np.abs(cad_v[:, 2] - z) < tol, :2]
+        mesh_near = mesh_v[np.abs(mesh_v[:, 2] - z) < tol, :2]
+        if len(cad_near) < 2 or len(mesh_near) < 2:
+            continue
+        cad_spread = np.prod(np.ptp(cad_near, axis=0) + 1e-12)
+        mesh_spread = np.prod(np.ptp(mesh_near, axis=0) + 1e-12)
+        total = cad_spread + mesh_spread
+        total_diff += abs(cad_spread - mesh_spread) / total
+
+    return float(total_diff / n_slices * 100)
+
+
+# =========================================================================
+# Fixers (moved from adversarial_loop for standard reuse)
+# =========================================================================
+
+def fix_cross_section_contour(cad_v, cad_f, mesh_v, mesh_f):
+    """Per-Z-slice radial + XY centroid correction."""
+    v = np.asarray(cad_v, dtype=np.float64).copy()
+    mv = np.asarray(mesh_v)
+    z_min = max(v[:, 2].min(), mv[:, 2].min())
+    z_max = min(v[:, 2].max(), mv[:, 2].max())
+    n_slices = 15
+    z_vals = np.linspace(z_min, z_max, n_slices + 2)[1:-1]
+    tol = (z_max - z_min) / (n_slices * 2)
+
+    for z in z_vals:
+        cad_mask = np.abs(v[:, 2] - z) < tol
+        mesh_mask = np.abs(mv[:, 2] - z) < tol
+        if np.sum(cad_mask) < 3 or np.sum(mesh_mask) < 3:
+            continue
+        # Shift XY centroid toward mesh centroid
+        cad_c = v[cad_mask, :2].mean(axis=0)
+        mesh_c = mv[mesh_mask, :2].mean(axis=0)
+        shift = (mesh_c - cad_c) * 0.5
+        v[cad_mask, 0] += shift[0]
+        v[cad_mask, 1] += shift[1]
+        # Radial scale correction
+        cad_r = np.linalg.norm(v[cad_mask, :2] - mesh_c, axis=1)
+        mesh_r = np.linalg.norm(mv[mesh_mask, :2] - mesh_c, axis=1)
+        if cad_r.mean() > 1e-6:
+            s = np.clip(mesh_r.mean() / cad_r.mean(), 0.5, 2.0)
+            v[cad_mask, :2] = mesh_c + (v[cad_mask, :2] - mesh_c) * s
+    return v
+
+
+def fix_z_profile_area(cad_v, cad_f, mesh_v, mesh_f):
+    """Per-Z-slice XY spread correction."""
+    v = np.asarray(cad_v, dtype=np.float64).copy()
+    mv = np.asarray(mesh_v)
+    z_min = max(v[:, 2].min(), mv[:, 2].min())
+    z_max = min(v[:, 2].max(), mv[:, 2].max())
+    n_slices = 20
+    z_vals = np.linspace(z_min, z_max, n_slices + 2)[1:-1]
+    tol = (z_max - z_min) / (n_slices * 2)
+
+    for z in z_vals:
+        cad_mask = np.abs(v[:, 2] - z) < tol
+        mesh_mask = np.abs(mv[:, 2] - z) < tol
+        if np.sum(cad_mask) < 2 or np.sum(mesh_mask) < 2:
+            continue
+        for ax in [0, 1]:
+            cad_span = np.ptp(v[cad_mask, ax])
+            mesh_span = np.ptp(mv[mesh_mask, ax])
+            if cad_span > 1e-6:
+                s = np.clip(mesh_span / cad_span, 0.5, 2.0)
+                center = v[cad_mask, ax].mean()
+                v[cad_mask, ax] = center + (v[cad_mask, ax] - center) * s
+    return v
+
+
+# =========================================================================
+# Sweep-along-path alignment (path-based extrusion fitting)
+# =========================================================================
+
+def extract_mesh_skeleton(vertices, faces, n_points=20):
+    """Extract a centerline skeleton from a mesh by slicing along its
+    principal axis and connecting slice centroids.
+
+    Uses PCA to find the longest axis, then samples centroids at
+    regular intervals along that axis.
+
+    Args:
+        vertices:  (N, 3) mesh vertices
+        faces:     (M, 3) mesh faces
+        n_points:  number of skeleton points
+
+    Returns:
+        skeleton: (n_points, 3) ordered path through the mesh center
+        axis_direction: (3,) unit vector of the principal axis
+    """
+    verts = np.asarray(vertices, dtype=np.float64)
+    centroid = verts.mean(axis=0)
+    centered = verts - centroid
+
+    # PCA to find principal axis
+    cov = centered.T @ centered / len(verts)
+    eigvals, eigvecs = np.linalg.eigh(cov)
+    # Largest eigenvalue = principal axis
+    axis = eigvecs[:, np.argmax(eigvals)]
+    if axis[2] < 0:
+        axis = -axis
+
+    # Project all vertices onto this axis
+    projections = centered @ axis
+    t_min, t_max = float(projections.min()), float(projections.max())
+
+    t_values = np.linspace(t_min, t_max, n_points)
+    band = (t_max - t_min) / (n_points * 2)
+
+    skeleton = []
+    for t in t_values:
+        mask = np.abs(projections - t) <= band
+        if np.any(mask):
+            local_centroid = verts[mask].mean(axis=0)
+        else:
+            # Interpolate from centroid along axis
+            local_centroid = centroid + axis * t
+        skeleton.append(local_centroid)
+
+    return np.array(skeleton, dtype=np.float64), axis
+
+
+def extract_sweep_cross_section(vertices, faces, point, tangent,
+                                 radius=None, n_output=32):
+    """Extract a 2D cross-section of a mesh perpendicular to a direction
+    at a given point.
+
+    Collects vertices near the cutting plane, projects them onto the
+    plane defined by (point, tangent), and returns a 2D profile.
+
+    Args:
+        vertices:  (N, 3) mesh vertices
+        faces:     (M, 3) mesh faces
+        point:     (3,) point on the cutting plane
+        tangent:   (3,) normal to the cutting plane (path tangent)
+        radius:    max distance from point to include (None = auto)
+        n_output:  resample output polygon to this many points
+
+    Returns:
+        profile_2d: (n_output, 2) cross-section in local frame
+        frame:      dict with 'normal' and 'binormal' unit vectors
+    """
+    verts = np.asarray(vertices, dtype=np.float64)
+    point = np.asarray(point, dtype=np.float64)
+    tangent = np.asarray(tangent, dtype=np.float64)
+    tangent = tangent / max(np.linalg.norm(tangent), 1e-12)
+
+    # Signed distance of each vertex from the cutting plane
+    disp = verts - point
+    signed_dist = disp @ tangent
+
+    # Auto-determine band thickness
+    if radius is None:
+        span = np.ptp(verts @ tangent)
+        band = span / 40
+    else:
+        band = radius * 0.5
+
+    mask = np.abs(signed_dist) <= band
+    if np.sum(mask) < 3:
+        # Widen band
+        band *= 3
+        mask = np.abs(signed_dist) <= band
+    if np.sum(mask) < 3:
+        return np.zeros((0, 2)), {"normal": np.zeros(3), "binormal": np.zeros(3)}
+
+    near_pts = verts[mask]
+
+    # Build local 2D frame perpendicular to tangent
+    ref = np.array([0.0, 0.0, 1.0])
+    if abs(np.dot(tangent, ref)) > 0.9:
+        ref = np.array([1.0, 0.0, 0.0])
+    normal = np.cross(tangent, ref)
+    normal /= max(np.linalg.norm(normal), 1e-12)
+    binormal = np.cross(tangent, normal)
+
+    # Project to 2D
+    local = near_pts - point
+    u = local @ normal
+    v_coord = local @ binormal
+
+    pts_2d = np.column_stack([u, v_coord])
+
+    # Order by angle and resample
+    c2d = pts_2d.mean(axis=0)
+    angles = np.arctan2(pts_2d[:, 1] - c2d[1], pts_2d[:, 0] - c2d[0])
+    order = np.argsort(angles)
+    ordered = pts_2d[order]
+
+    if len(ordered) >= n_output:
+        ordered = _resample_polygon(ordered, n_output)
+
+    return ordered, {"normal": normal, "binormal": binormal}
+
+
+def fit_sweep_to_mesh(vertices, faces, n_path_points=20, n_profile=24):
+    """Automatically fit a sweep (profile + path) to a target mesh.
+
+    Extracts a skeleton path through the mesh, then samples cross-sections
+    along the path to determine the profile shape.
+
+    Args:
+        vertices:       (N, 3) target mesh
+        faces:          (M, 3) target mesh faces
+        n_path_points:  number of path points
+        n_profile:      profile resolution
+
+    Returns:
+        dict with:
+            path:     (M, 3) fitted path
+            profile:  (K, 2) representative 2D profile
+            profiles: list of (K, 2) per-path-point cross-sections
+            scales:   (M,) scale factor at each path point
+    """
+    verts = np.asarray(vertices, dtype=np.float64)
+    faces_arr = np.asarray(faces)
+
+    # Extract skeleton
+    skeleton, axis = extract_mesh_skeleton(verts, faces_arr, n_path_points)
+
+    from meshxcad.objects.operations import compute_frenet_frames
+    tangents, normals, binormals = compute_frenet_frames(skeleton)
+
+    # Extract cross-sections at each path point
+    profiles = []
+    scales = []
+    for i in range(len(skeleton)):
+        cs, _ = extract_sweep_cross_section(
+            verts, faces_arr, skeleton[i], tangents[i],
+            n_output=n_profile)
+        if len(cs) >= 3:
+            # Measure scale as RMS distance from centroid
+            c = cs.mean(axis=0)
+            scale = float(np.sqrt(np.mean(np.sum((cs - c) ** 2, axis=1))))
+            profiles.append(cs - c)  # centered
+            scales.append(scale)
+        else:
+            profiles.append(None)
+            scales.append(0.0)
+
+    # Find representative profile (median scale, non-None)
+    valid_indices = [i for i, p in enumerate(profiles) if p is not None]
+    if not valid_indices:
+        # Fallback: circular profile
+        t = np.linspace(0, 2 * np.pi, n_profile, endpoint=False)
+        circle = np.column_stack([np.cos(t), np.sin(t)])
+        return {"path": skeleton, "profile": circle,
+                "profiles": profiles, "scales": np.ones(len(skeleton))}
+
+    valid_scales = [scales[i] for i in valid_indices]
+    median_scale = float(np.median(valid_scales))
+    # Pick the profile closest to median scale
+    best_idx = valid_indices[
+        int(np.argmin([abs(scales[i] - median_scale) for i in valid_indices]))]
+    representative = profiles[best_idx]
+
+    # Normalize scales relative to the representative
+    if median_scale > 1e-12:
+        norm_scales = np.array(scales) / median_scale
+    else:
+        norm_scales = np.ones(len(skeleton))
+
+    return {
+        "path": skeleton,
+        "profile": representative,
+        "profiles": profiles,
+        "scales": norm_scales,
+    }
+
+
+def compare_sweep_to_mesh(sweep_v, sweep_f, mesh_v, mesh_f):
+    """Compare a sweep-generated mesh to a target mesh.
+
+    Returns quality metrics: Hausdorff distance, mean surface distance,
+    volume overlap estimate, and cross-section alignment.
+
+    Args:
+        sweep_v, sweep_f: sweep mesh
+        mesh_v, mesh_f:   target mesh
+
+    Returns:
+        dict with hausdorff, mean_dist, coverage, quality_score (0-100)
+    """
+    from scipy.spatial import KDTree
+    sv = np.asarray(sweep_v, dtype=np.float64)
+    mv = np.asarray(mesh_v, dtype=np.float64)
+
+    tree_m = KDTree(mv)
+    d_s2m, _ = tree_m.query(sv)
+    tree_s = KDTree(sv)
+    d_m2s, _ = tree_s.query(mv)
+
+    hausdorff = float(max(np.max(d_s2m), np.max(d_m2s)))
+    mean_dist = float((np.mean(d_s2m) + np.mean(d_m2s)) / 2)
+
+    # Coverage: fraction of mesh vertices within 1 median-distance of sweep
+    median_d = float(np.median(d_m2s))
+    threshold = max(median_d * 2, 0.5)
+    coverage = float(np.mean(d_m2s < threshold))
+
+    # Quality score: 100 = perfect, 0 = terrible
+    # Based on inverse of normalized mean distance
+    mesh_span = float(np.max(np.ptp(mv, axis=0)))
+    if mesh_span > 1e-12:
+        normalized_dist = mean_dist / mesh_span
+        quality = max(0.0, min(100.0, 100 * (1 - normalized_dist * 10)))
+    else:
+        quality = 0.0
+
+    return {
+        "hausdorff": hausdorff,
+        "mean_dist": mean_dist,
+        "coverage": coverage,
+        "quality_score": round(quality, 1),
+    }
+
+
+def refine_sweep_path(path, mesh_vertices, mesh_faces, iterations=3):
+    """Refine a sweep path so it better tracks the mesh centerline.
+
+    At each path point, shifts toward the centroid of nearby mesh vertices
+    while maintaining smoothness.
+
+    Args:
+        path:           (M, 3) current path
+        mesh_vertices:  (N, 3) target mesh
+        mesh_faces:     (F, 3) target mesh faces
+        iterations:     number of refinement passes
+
+    Returns:
+        refined_path: (M, 3)
+    """
+    from meshxcad.objects.operations import compute_frenet_frames
+    p = np.asarray(path, dtype=np.float64).copy()
+    mv = np.asarray(mesh_vertices, dtype=np.float64)
+    n = len(p)
+
+    for _ in range(iterations):
+        tangents, _, _ = compute_frenet_frames(p)
+
+        for i in range(1, n - 1):  # keep endpoints fixed
+            # Find mesh vertices near this path point
+            disp = mv - p[i]
+            dists = np.linalg.norm(disp, axis=1)
+            # Use vertices within a local neighborhood
+            spacing = np.linalg.norm(p[min(i+1, n-1)] - p[max(i-1, 0)]) / 2
+            radius = max(spacing * 1.5, 0.5)
+            mask = dists < radius
+
+            if np.sum(mask) >= 3:
+                local_centroid = mv[mask].mean(axis=0)
+                # Move path point toward centroid, but constrained
+                # to not move along the tangent (preserve path parameter)
+                shift = local_centroid - p[i]
+                # Remove tangent component to stay on the "same" path station
+                tangent_comp = np.dot(shift, tangents[i]) * tangents[i]
+                lateral_shift = shift - tangent_comp
+                p[i] += lateral_shift * 0.5
+
+        # Light smoothing pass
+        smoothed = p.copy()
+        for i in range(1, n - 1):
+            smoothed[i] = 0.5 * p[i] + 0.25 * (p[i-1] + p[i+1])
+        p = smoothed
+
+    return p
+
+
+def refine_sweep_profile(profile, path, mesh_vertices, mesh_faces,
+                          n_samples=5):
+    """Refine a sweep profile by comparing cross-sections at multiple
+    path points to the actual mesh cross-sections.
+
+    Args:
+        profile:        (K, 2) current profile
+        path:           (M, 3) sweep path
+        mesh_vertices:  (N, 3) target mesh
+        mesh_faces:     (F, 3) target mesh faces
+        n_samples:      number of path points to sample
+
+    Returns:
+        refined_profile: (K, 2)
+    """
+    from meshxcad.objects.operations import compute_frenet_frames
+    prof = np.asarray(profile, dtype=np.float64).copy()
+    path_arr = np.asarray(path, dtype=np.float64)
+    n_path = len(path_arr)
+    n_pts = len(prof)
+
+    tangents, _, _ = compute_frenet_frames(path_arr)
+
+    # Sample evenly along path
+    indices = np.linspace(1, n_path - 2, min(n_samples, n_path - 2),
+                          dtype=int)
+
+    accumulated = np.zeros_like(prof)
+    count = 0
+    for idx in indices:
+        cs, _ = extract_sweep_cross_section(
+            mesh_vertices, mesh_faces,
+            path_arr[idx], tangents[idx],
+            n_output=n_pts)
+        if len(cs) >= 3:
+            # Center the cross-section
+            cs_centered = cs - cs.mean(axis=0)
+            # Accumulate
+            if len(cs_centered) == n_pts:
+                accumulated += cs_centered
+                count += 1
+
+    if count > 0:
+        average_cs = accumulated / count
+        # Blend current profile toward average cross-section
+        refined = prof * 0.4 + average_cs * 0.6
+        return refined
+
+    return prof
+
+
+def adaptive_sweep_extrude(mesh_vertices, mesh_faces,
+                            n_path=20, n_profile=24):
+    """Automatically generate a sweep mesh that approximates a target mesh.
+
+    Extracts a skeleton path, fits cross-sections, and sweeps to create
+    a clean CAD-style mesh.
+
+    Args:
+        mesh_vertices: (N, 3) target mesh
+        mesh_faces:    (M, 3) target mesh faces
+        n_path:        number of path points
+        n_profile:     profile resolution
+
+    Returns:
+        vertices: (P, 3) sweep mesh vertices
+        faces:    (Q, 3) sweep mesh faces
+        fit_info: dict with path, profile, scales, quality
+    """
+    from meshxcad.objects.operations import sweep_along_path
+
+    # Step 1: Fit sweep parameters to mesh
+    fit = fit_sweep_to_mesh(mesh_vertices, mesh_faces,
+                            n_path_points=n_path, n_profile=n_profile)
+
+    # Step 2: Refine path
+    refined_path = refine_sweep_path(
+        fit["path"], mesh_vertices, mesh_faces, iterations=3)
+
+    # Step 3: Refine profile
+    refined_profile = refine_sweep_profile(
+        fit["profile"], refined_path, mesh_vertices, mesh_faces,
+        n_samples=min(5, n_path - 2))
+
+    # Step 4: Build scale function from extracted scales
+    scales = fit["scales"]
+    def scale_fn(t):
+        idx = min(int(t * (len(scales) - 1)), len(scales) - 1)
+        return float(scales[idx])
+
+    # Step 5: Generate sweep mesh
+    sweep_v, sweep_f = sweep_along_path(
+        refined_profile, refined_path,
+        n_profile=n_profile, scale_fn=scale_fn)
+
+    # Step 6: Measure quality
+    quality = compare_sweep_to_mesh(sweep_v, sweep_f,
+                                     mesh_vertices, mesh_faces)
+
+    return sweep_v, sweep_f, {
+        "path": refined_path,
+        "profile": refined_profile,
+        "scales": scales,
+        "quality": quality,
+    }
+
+
+def detect_sweep_candidate(vertices, faces):
+    """Detect whether a mesh looks like it could be a sweep (elongated
+    shape with consistent cross-sections).
+
+    Args:
+        vertices: (N, 3) mesh vertices
+        faces:    (M, 3) mesh faces
+
+    Returns:
+        dict with:
+            is_sweep:     bool — True if mesh appears sweep-like
+            elongation:   ratio of longest to shortest axis
+            consistency:  0-1 cross-section consistency score
+            axis:         (3,) principal axis direction
+            confidence:   0-1 overall confidence
+    """
+    verts = np.asarray(vertices, dtype=np.float64)
+
+    # PCA
+    centroid = verts.mean(axis=0)
+    centered = verts - centroid
+    cov = centered.T @ centered / len(verts)
+    eigvals, eigvecs = np.linalg.eigh(cov)
+    order = np.argsort(eigvals)[::-1]
+    eigvals = eigvals[order]
+    eigvecs = eigvecs[:, order]
+
+    axis = eigvecs[:, 0]
+    if axis[2] < 0:
+        axis = -axis
+
+    # Elongation: ratio of largest to second-largest eigenvalue
+    if eigvals[1] > 1e-12:
+        elongation = float(np.sqrt(eigvals[0] / eigvals[1]))
+    else:
+        elongation = float("inf")
+
+    # Cross-section consistency: sample slices and compare areas
+    projections = centered @ axis
+    t_min, t_max = projections.min(), projections.max()
+    n_slices = 10
+    t_values = np.linspace(t_min + 0.1 * (t_max - t_min),
+                           t_max - 0.1 * (t_max - t_min), n_slices)
+    band = (t_max - t_min) / (n_slices * 2)
+
+    areas = []
+    for t in t_values:
+        mask = np.abs(projections - t) <= band
+        if np.sum(mask) < 3:
+            continue
+        local = verts[mask]
+        # Project onto plane perpendicular to principal axis
+        local_centered = local - local.mean(axis=0)
+        # Use the two minor eigenvectors as the cross-section plane
+        u_coords = local_centered @ eigvecs[:, 1]
+        v_coords = local_centered @ eigvecs[:, 2]
+        area_proxy = float((np.ptp(u_coords) + 1e-12) *
+                           (np.ptp(v_coords) + 1e-12))
+        areas.append(area_proxy)
+
+    if len(areas) >= 3:
+        areas_arr = np.array(areas)
+        mean_area = float(areas_arr.mean())
+        if mean_area > 1e-12:
+            consistency = float(1.0 - min(areas_arr.std() / mean_area, 1.0))
+        else:
+            consistency = 0.0
+    else:
+        consistency = 0.0
+
+    # A sweep candidate has elongation > 1.5 and good consistency
+    is_sweep = elongation > 1.5 and consistency > 0.3
+    confidence = min(1.0, (elongation - 1.0) / 3.0) * consistency
+
+    return {
+        "is_sweep": is_sweep,
+        "elongation": round(elongation, 2),
+        "consistency": round(consistency, 3),
+        "axis": axis,
+        "confidence": round(confidence, 3),
+    }
+
+
+def suggest_sweep_adjustments(sweep_v, sweep_f, mesh_v, mesh_f,
+                               path=None, profile=None):
+    """Analyze a sweep mesh vs a target mesh and suggest improvements.
+
+    Args:
+        sweep_v, sweep_f: current sweep mesh
+        mesh_v, mesh_f:   target mesh
+        path:             (M, 3) current path (optional)
+        profile:          (K, 2) current profile (optional)
+
+    Returns:
+        list of dicts with action, priority, params, reason
+    """
+    metrics = compare_sweep_to_mesh(sweep_v, sweep_f, mesh_v, mesh_f)
+    suggestions = []
+
+    # 1. Poor coverage
+    if metrics["coverage"] < 0.7:
+        suggestions.append({
+            "action": "refine_sweep_path",
+            "priority": 1,
+            "params": {"iterations": 5},
+            "reason": f"Low coverage ({metrics['coverage']:.1%}) — "
+                      f"path may not follow mesh centerline",
+        })
+
+    # 2. High mean distance
+    if metrics["mean_dist"] > 1.0:
+        suggestions.append({
+            "action": "refine_sweep_profile",
+            "priority": 2,
+            "params": {"n_samples": 8},
+            "reason": f"Mean distance {metrics['mean_dist']:.2f} — "
+                      f"profile shape needs adjustment",
+        })
+
+    # 3. High Hausdorff
+    if metrics["hausdorff"] > 5.0:
+        suggestions.append({
+            "action": "adaptive_sweep_extrude",
+            "priority": 3,
+            "params": {"n_path": 30, "n_profile": 32},
+            "reason": f"Hausdorff {metrics['hausdorff']:.2f} — "
+                      f"full adaptive rebuild recommended",
+        })
+
+    # 4. Low quality
+    if metrics["quality_score"] < 50:
+        suggestions.append({
+            "action": "fit_sweep_to_mesh",
+            "priority": 4,
+            "params": {"n_path_points": 25, "n_profile": 32},
+            "reason": f"Quality score {metrics['quality_score']} — "
+                      f"re-fit sweep parameters from scratch",
+        })
+
+    # 5. Path needs more detail
+    if path is not None and len(path) < 15:
+        suggestions.append({
+            "action": "fit_sweep_to_mesh",
+            "priority": 5,
+            "params": {"n_path_points": 30},
+            "reason": f"Path has only {len(path)} points — "
+                      f"increase resolution for better fit",
+        })
+
+    # 6. Profile may need higher resolution
+    if profile is not None and len(profile) < 20:
+        suggestions.append({
+            "action": "refine_sweep_profile",
+            "priority": 6,
+            "params": {"n_samples": 10},
+            "reason": f"Profile has only {len(profile)} points — "
+                      f"increase resolution",
+        })
+
+    suggestions.sort(key=lambda s: s["priority"])
+    return suggestions if suggestions else [{
+        "action": "none",
+        "priority": 0,
+        "params": {},
+        "reason": f"Sweep fits well (quality={metrics['quality_score']})",
+    }]
+
+
+# =========================================================================
+# Extended extrude/sweep differentiators (round 2)
+# =========================================================================
+
+def taper_consistency_diff(cad_v, cad_f, mesh_v, mesh_f, n_slices=10):
+    """Compare how cross-section area varies along Z (taper consistency)."""
+    def _taper_profile(v, f, n):
+        v = np.asarray(v, dtype=np.float64)
+        z_min, z_max = float(v[:, 2].min()), float(v[:, 2].max())
+        if z_max - z_min < 1e-6:
+            return np.ones(n)
+        z_vals = np.linspace(z_min + 0.1 * (z_max - z_min),
+                             z_max - 0.1 * (z_max - z_min), n)
+        areas = []
+        for z in z_vals:
+            cs = extract_cross_section(v, f, z)
+            if len(cs) >= 3:
+                areas.append(_convex_hull_area(cs))
+            else:
+                areas.append(0.0)
+        arr = np.array(areas)
+        total = arr.sum()
+        return arr / max(total, 1e-12)
+
+    tp_cad = _taper_profile(cad_v, cad_f, n_slices)
+    tp_mesh = _taper_profile(mesh_v, mesh_f, n_slices)
+    return float(np.sum(np.abs(tp_cad - tp_mesh)) * 50)
+
+
+def sweep_path_deviation(cad_v, cad_f, mesh_v, mesh_f, n_points=15):
+    """Compare skeleton centerlines of two meshes."""
+    skel_cad, _ = extract_mesh_skeleton(cad_v, cad_f, n_points=n_points)
+    skel_mesh, _ = extract_mesh_skeleton(mesh_v, mesh_f, n_points=n_points)
+
+    if len(skel_cad) == 0 or len(skel_mesh) == 0:
+        return 0.0
+
+    tree = KDTree(skel_mesh)
+    dists, _ = tree.query(skel_cad)
+    bbox_diag = float(np.linalg.norm(
+        np.asarray(mesh_v).max(axis=0) - np.asarray(mesh_v).min(axis=0)))
+    return float(np.mean(dists) / max(bbox_diag, 1e-12) * 100)
+
+
+def profile_circularity_diff(cad_v, cad_f, mesh_v, mesh_f, n_slices=8):
+    """Compare cross-section circularity at multiple heights."""
+    def _circularity_profile(v, f, n):
+        v = np.asarray(v, dtype=np.float64)
+        z_min, z_max = float(v[:, 2].min()), float(v[:, 2].max())
+        if z_max - z_min < 1e-6:
+            return np.ones(n)
+        z_vals = np.linspace(z_min + 0.15 * (z_max - z_min),
+                             z_max - 0.15 * (z_max - z_min), n)
+        circs = []
+        for z in z_vals:
+            cs = extract_cross_section(v, f, z)
+            if len(cs) >= 3:
+                center = cs.mean(axis=0)
+                radii = np.linalg.norm(cs - center, axis=1)
+                if radii.mean() > 1e-8:
+                    circs.append(float(radii.std() / radii.mean()))
+                else:
+                    circs.append(0.0)
+            else:
+                circs.append(0.0)
+        return np.array(circs)
+
+    c_cad = _circularity_profile(cad_v, cad_f, n_slices)
+    c_mesh = _circularity_profile(mesh_v, mesh_f, n_slices)
+    return float(np.mean(np.abs(c_cad - c_mesh)) * 100)
+
+
+def extrude_twist_diff(cad_v, cad_f, mesh_v, mesh_f, n_slices=8):
+    """Detect rotational offset between cross-sections at different heights."""
+    def _twist_angles(v, f, n):
+        v = np.asarray(v, dtype=np.float64)
+        z_min, z_max = float(v[:, 2].min()), float(v[:, 2].max())
+        if z_max - z_min < 1e-6:
+            return np.zeros(n)
+        z_vals = np.linspace(z_min + 0.15 * (z_max - z_min),
+                             z_max - 0.15 * (z_max - z_min), n)
+        angles = []
+        prev_angle = None
+        for z in z_vals:
+            cs = extract_cross_section(v, f, z)
+            if len(cs) >= 3:
+                center = cs.mean(axis=0)
+                # Find the angle of the point farthest from center
+                diffs = cs - center
+                idx = np.argmax(np.linalg.norm(diffs, axis=1))
+                angle = math.atan2(diffs[idx, 1], diffs[idx, 0])
+                if prev_angle is not None:
+                    delta = angle - prev_angle
+                    # Normalize to [-pi, pi]
+                    delta = (delta + math.pi) % (2 * math.pi) - math.pi
+                    angles.append(abs(delta))
+                prev_angle = angle
+            else:
+                angles.append(0.0)
+        return np.array(angles) if angles else np.zeros(1)
+
+    t_cad = _twist_angles(cad_v, cad_f, n_slices)
+    t_mesh = _twist_angles(mesh_v, mesh_f, n_slices)
+    n = min(len(t_cad), len(t_mesh))
+    if n == 0:
+        return 0.0
+    return float(np.mean(np.abs(t_cad[:n] - t_mesh[:n])) * 100 / math.pi)
+
+
+# =========================================================================
+# Extended extrude/sweep fixers (round 2)
+# =========================================================================
+
+def fix_taper_consistency(cad_v, cad_f, mesh_v, mesh_f):
+    """Per-Z-slice area scaling to match mesh taper."""
+    v = np.asarray(cad_v, dtype=np.float64).copy()
+    mv = np.asarray(mesh_v)
+    mf = np.asarray(mesh_f)
+    z_min = max(v[:, 2].min(), mv[:, 2].min())
+    z_max = min(v[:, 2].max(), mv[:, 2].max())
+    if z_max - z_min < 1e-6:
+        return v
+
+    n_slices = 12
+    z_vals = np.linspace(z_min, z_max, n_slices + 2)[1:-1]
+    tol = (z_max - z_min) / (n_slices * 2)
+
+    for z in z_vals:
+        cad_mask = np.abs(v[:, 2] - z) < tol
+        mesh_mask = np.abs(mv[:, 2] - z) < tol
+        if np.sum(cad_mask) < 3 or np.sum(mesh_mask) < 3:
+            continue
+
+        # Radial scaling from centroid
+        c_center = v[cad_mask, :2].mean(axis=0)
+        m_center = mv[mesh_mask, :2].mean(axis=0)
+
+        c_radii = np.linalg.norm(v[cad_mask, :2] - c_center, axis=1)
+        m_radii = np.linalg.norm(mv[mesh_mask, :2] - m_center, axis=1)
+
+        if c_radii.mean() > 1e-6:
+            s = np.clip(m_radii.mean() / c_radii.mean(), 0.5, 2.0)
+            v[cad_mask, :2] = c_center + (v[cad_mask, :2] - c_center) * s
+            # Also shift centroid
+            v[cad_mask, :2] += (m_center - c_center) * 0.3
+
+    return v
+
+
+def fix_sweep_path_deviation(cad_v, cad_f, mesh_v, mesh_f):
+    """Shift vertices along skeleton direction toward mesh skeleton."""
+    v = np.asarray(cad_v, dtype=np.float64).copy()
+    mv = np.asarray(mesh_v)
+    mf = np.asarray(mesh_f)
+    f = np.asarray(cad_f)
+
+    skel_mesh, _ = extract_mesh_skeleton(mv, mf, n_points=15)
+    if len(skel_mesh) < 2:
+        return v
+
+    tree = KDTree(mv)
+    _, idx = tree.query(v)
+    v = v * 0.65 + mv[idx] * 0.35
+    return v
+
+
+def fix_profile_circularity(cad_v, cad_f, mesh_v, mesh_f):
+    """Per-slice radial adjustment to match mesh circularity."""
+    v = np.asarray(cad_v, dtype=np.float64).copy()
+    mv = np.asarray(mesh_v)
+    z_min = max(v[:, 2].min(), mv[:, 2].min())
+    z_max = min(v[:, 2].max(), mv[:, 2].max())
+    if z_max - z_min < 1e-6:
+        return v
+
+    n_slices = 10
+    z_vals = np.linspace(z_min, z_max, n_slices + 2)[1:-1]
+    tol = (z_max - z_min) / (n_slices * 2)
+
+    for z in z_vals:
+        cad_mask = np.abs(v[:, 2] - z) < tol
+        mesh_mask = np.abs(mv[:, 2] - z) < tol
+        if np.sum(cad_mask) < 3 or np.sum(mesh_mask) < 3:
+            continue
+
+        c_center = v[cad_mask, :2].mean(axis=0)
+        m_center = mv[mesh_mask, :2].mean(axis=0)
+        m_radii = np.linalg.norm(mv[mesh_mask, :2] - m_center, axis=1)
+        target_r = float(np.median(m_radii))
+
+        c_diffs = v[cad_mask, :2] - c_center
+        c_radii = np.linalg.norm(c_diffs, axis=1, keepdims=True)
+        c_radii[c_radii < 1e-8] = 1e-8
+        c_dirs = c_diffs / c_radii
+
+        new_radii = c_radii * 0.6 + target_r * 0.4
+        v[cad_mask, :2] = c_center + c_dirs * new_radii
+
+    return v
+
+
+def fix_extrude_twist(cad_v, cad_f, mesh_v, mesh_f):
+    """Apply per-slice rotation correction."""
+    v = np.asarray(cad_v, dtype=np.float64).copy()
+    mv = np.asarray(mesh_v)
+    mf = np.asarray(mesh_f)
+    z_min = max(v[:, 2].min(), mv[:, 2].min())
+    z_max = min(v[:, 2].max(), mv[:, 2].max())
+    if z_max - z_min < 1e-6:
+        return v
+
+    n_slices = 8
+    z_vals = np.linspace(z_min, z_max, n_slices + 2)[1:-1]
+    tol = (z_max - z_min) / (n_slices * 2)
+
+    for z in z_vals:
+        cad_mask = np.abs(v[:, 2] - z) < tol
+        mesh_mask = np.abs(mv[:, 2] - z) < tol
+        if np.sum(cad_mask) < 3 or np.sum(mesh_mask) < 3:
+            continue
+
+        c_center = v[cad_mask, :2].mean(axis=0)
+        m_center = mv[mesh_mask, :2].mean(axis=0)
+
+        # Find principal angle of each slice
+        def _principal_angle(pts, center):
+            diffs = pts - center
+            if len(diffs) < 2:
+                return 0.0
+            cov = diffs.T @ diffs / len(diffs)
+            _, evecs = np.linalg.eigh(cov)
+            return math.atan2(evecs[1, -1], evecs[0, -1])
+
+        c_angle = _principal_angle(v[cad_mask, :2], c_center)
+        m_angle = _principal_angle(mv[mesh_mask, :2], m_center)
+        delta = m_angle - c_angle
+        delta = (delta + math.pi) % (2 * math.pi) - math.pi
+
+        # Apply partial rotation correction
+        delta *= 0.5
+        cos_d, sin_d = math.cos(delta), math.sin(delta)
+        centered = v[cad_mask, :2] - c_center
+        rotated = np.column_stack([
+            centered[:, 0] * cos_d - centered[:, 1] * sin_d,
+            centered[:, 0] * sin_d + centered[:, 1] * cos_d,
+        ])
+        v[cad_mask, :2] = c_center + rotated
+
+    return v
