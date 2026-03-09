@@ -213,27 +213,9 @@ Invoke-Python $Python @("-m", "venv", $VenvDir)
 & "$VenvDir\Scripts\Activate.ps1"
 
 # ============================================================
-# 4. Configure pip (mirror, SSL cert)
+# 4. Configure pip (SSL cert)
 # ============================================================
 $PipExtraArgs = @()
-
-# Mirror URL — use MIRROR_URL env var to point pip at a private PyPI mirror
-if ($env:MIRROR_URL) {
-    Write-Host ""
-    Write-Host "Using PyPI mirror: $($env:MIRROR_URL)"
-    $PipExtraArgs += @("--index-url", $env:MIRROR_URL)
-
-    # Write pip.ini so the mirror persists inside the venv
-    $pipIniDir = "$VenvDir"
-    $pipIni = Join-Path $pipIniDir "pip.ini"
-    @"
-[global]
-index-url = $($env:MIRROR_URL)
-"@ | Set-Content -Path $pipIni
-
-    # Also set the env var so the upcoming pip bootstrap respects it
-    $env:PIP_INDEX_URL = $env:MIRROR_URL
-}
 
 # SSL certificate — use SSL_CERT_FILE env var for corporate/custom CAs
 if ($env:SSL_CERT_FILE) {
@@ -241,19 +223,12 @@ if ($env:SSL_CERT_FILE) {
         Write-Host "Using SSL certificate: $($env:SSL_CERT_FILE)"
         $PipExtraArgs += @("--cert", $env:SSL_CERT_FILE)
 
-        # Append to pip.ini so it persists
+        # Write pip.ini so the cert persists inside the venv
         $pipIni = Join-Path $VenvDir "pip.ini"
-        if (Test-Path $pipIni) {
-            $content = Get-Content $pipIni -Raw
-            if ($content -notmatch "(?m)^cert\s*=") {
-                Add-Content -Path $pipIni -Value "cert = $($env:SSL_CERT_FILE)"
-            }
-        } else {
-            @"
+        @"
 [global]
 cert = $($env:SSL_CERT_FILE)
 "@ | Set-Content -Path $pipIni
-        }
 
         # Also export so pip's internal operations respect it
         $env:PIP_CERT = $env:SSL_CERT_FILE

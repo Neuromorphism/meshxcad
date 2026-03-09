@@ -286,25 +286,9 @@ echo "Creating virtual environment in $VENV_DIR (Python $PY_VERSION) ..."
 source "$VENV_DIR/bin/activate"
 
 # ============================================================
-# 4. Configure pip (mirror, SSL cert)
+# 4. Configure pip (SSL cert)
 # ============================================================
 PIP_EXTRA_ARGS=()
-
-# Mirror URL — use MIRROR_URL env var to point pip at a private PyPI mirror
-if [ -n "${MIRROR_URL:-}" ]; then
-    echo ""
-    echo "Using PyPI mirror: $MIRROR_URL"
-    PIP_EXTRA_ARGS+=("--index-url" "$MIRROR_URL")
-
-    # Write pip.conf so the mirror persists inside the venv
-    PIP_CONF_DIR="$VENV_DIR/pip.conf"
-    cat > "$PIP_CONF_DIR" <<PIPEOF
-[global]
-index-url = $MIRROR_URL
-PIPEOF
-    # Also set the env var so the upcoming pip bootstrap respects it
-    export PIP_INDEX_URL="$MIRROR_URL"
-fi
 
 # SSL certificate — use SSL_CERT_FILE env var for corporate/custom CAs
 if [ -n "${SSL_CERT_FILE:-}" ]; then
@@ -312,19 +296,11 @@ if [ -n "${SSL_CERT_FILE:-}" ]; then
         echo "Using SSL certificate: $SSL_CERT_FILE"
         PIP_EXTRA_ARGS+=("--cert" "$SSL_CERT_FILE")
 
-        # Append to pip.conf so it persists
-        PIP_CONF_DIR="$VENV_DIR/pip.conf"
-        if [ -f "$PIP_CONF_DIR" ]; then
-            # Append under [global] if file already exists
-            if ! grep -q "^cert" "$PIP_CONF_DIR" 2>/dev/null; then
-                echo "cert = $SSL_CERT_FILE" >> "$PIP_CONF_DIR"
-            fi
-        else
-            cat > "$PIP_CONF_DIR" <<PIPEOF
+        # Write pip.conf so the cert persists inside the venv
+        cat > "$VENV_DIR/pip.conf" <<PIPEOF
 [global]
 cert = $SSL_CERT_FILE
 PIPEOF
-        fi
 
         # Also export so pip's internal get-pip / ensurepip respects it
         export PIP_CERT="$SSL_CERT_FILE"
