@@ -230,8 +230,10 @@ if ($env:SSL_CERT_FILE) {
 cert = $($env:SSL_CERT_FILE)
 "@ | Set-Content -Path $pipIni
 
-        # Also export so pip's internal operations respect it
+        # Export so pip's requests library and other tools respect the CA
         $env:PIP_CERT = $env:SSL_CERT_FILE
+        $env:REQUESTS_CA_BUNDLE = $env:SSL_CERT_FILE
+        $env:CURL_CA_BUNDLE = $env:SSL_CERT_FILE
     } else {
         Write-Host "WARNING: SSL_CERT_FILE is set to '$($env:SSL_CERT_FILE)' but file does not exist." -ForegroundColor Yellow
         Write-Host "         Continuing without custom certificate."

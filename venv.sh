@@ -302,9 +302,10 @@ if [ -n "${SSL_CERT_FILE:-}" ]; then
 cert = $SSL_CERT_FILE
 PIPEOF
 
-        # Also export so pip's internal get-pip / ensurepip respects it
+        # Export so pip's requests library and other tools respect the CA
         export PIP_CERT="$SSL_CERT_FILE"
-        # Python's ssl module also checks this
+        export REQUESTS_CA_BUNDLE="$SSL_CERT_FILE"
+        export CURL_CA_BUNDLE="$SSL_CERT_FILE"
         export SSL_CERT_FILE="$SSL_CERT_FILE"
     else
         echo "WARNING: SSL_CERT_FILE is set to '$SSL_CERT_FILE' but file does not exist."
