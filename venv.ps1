@@ -7,6 +7,10 @@
 #   .\venv.ps1
 #   .\.venv\Scripts\Activate.ps1
 #
+# To point at a specific Python install, set one of:
+#   $env:MESHXCAD_PYTHON = "C:\Python311\python.exe"
+#   $env:MESHXCAD_PYTHON_DIR = "C:\Python311"
+#
 # If scripts are blocked, run first:
 #   Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
 
@@ -108,94 +112,121 @@ if ($FreecadPyVer) {
 }
 
 # ============================================================
-# 2. Download and install Python 3.11
+# 2. Locate Python
 # ============================================================
-$RequiredMajorMinor = if ($FreecadPyVer) { $FreecadPyVer } else { "3.11" }
-$PythonInstallDir = Join-Path $PSScriptRoot ".python"
+#
+# Resolution order:
+#   1. MESHXCAD_PYTHON env var  - full path to python.exe
+#   2. MESHXCAD_PYTHON_DIR env var - directory containing python.exe
+#   3. Search PATH for python / python3 / py matching required version
+#   4. Fallback: any Python 3 on PATH
+#
+$RequiredVer = if ($FreecadPyVer) { $FreecadPyVer } else { "3.11" }
+$Python = $null
 
 Write-Host ""
-Write-Host "--- Installing Python $RequiredMajorMinor ---" -ForegroundColor Cyan
+Write-Host "--- Locating Python $RequiredVer ---" -ForegroundColor Cyan
 
-# Find the latest micro release of the required version from python.org
-function Get-LatestPythonUrl {
-    param([string]$MajorMinor)
-
-    Write-Host "Querying python.org for latest Python $MajorMinor release ..."
-    $releasesPage = Invoke-WebRequest -Uri "https://www.python.org/downloads/" -UseBasicParsing
-    $pattern = "python-($([regex]::Escape($MajorMinor))\.\d+)-"
-
-    # Find all matching version strings on the downloads page
-    $versions = @()
-    foreach ($match in [regex]::Matches($releasesPage.Content, $pattern)) {
-        $versions += $match.Groups[1].Value
-    }
-    $versions = $versions | Sort-Object { [version]$_ } -Descending | Select-Object -Unique
-    if ($versions.Count -eq 0) {
-        Write-Host "ERROR: Could not find Python $MajorMinor on python.org" -ForegroundColor Red
-        exit 1
-    }
-    $latestVer = $versions[0]
-    Write-Host "Latest release: Python $latestVer"
-
-    # Build the installer URL (64-bit embeddable or full installer)
-    $arch = if ([Environment]::Is64BitOperatingSystem) { "amd64" } else { "win32" }
-    $installerUrl = "https://www.python.org/ftp/python/$latestVer/python-$latestVer-$arch.exe"
-    return @{ Version = $latestVer; Url = $installerUrl }
+# Helper: run a candidate and check --version output
+function Test-PythonExe {
+    param([string]$Exe, [string]$Ver)
+    $ErrorActionPreference = "Continue"
+    try {
+        $out = & $Exe --version 2>&1 | Out-String
+        if ($out -match "Python (\d+\.\d+)") {
+            if ($Matches[1] -eq $Ver) { return $true }
+        }
+    } catch {}
+    return $false
 }
 
-$pyInfo = Get-LatestPythonUrl $RequiredMajorMinor
-$installerPath = Join-Path $env:TEMP "python-$($pyInfo.Version)-installer.exe"
-
-# Download the installer
-if (-not (Test-Path $installerPath)) {
-    Write-Host "Downloading Python $($pyInfo.Version) ..."
-    Write-Host "  $($pyInfo.Url)"
-    Invoke-WebRequest -Uri $pyInfo.Url -OutFile $installerPath -UseBasicParsing
-    Write-Host "Download complete." -ForegroundColor Green
-} else {
-    Write-Host "Installer already downloaded: $installerPath"
-}
-
-# Install Python to a local directory (no admin required, no PATH pollution)
-if (-not (Test-Path (Join-Path $PythonInstallDir "python.exe"))) {
-    Write-Host "Installing Python $($pyInfo.Version) to $PythonInstallDir ..."
-    $installArgs = @(
-        "/quiet"
-        "InstallAllUsers=0"
-        "TargetDir=$PythonInstallDir"
-        "AssociateFiles=0"
-        "Shortcuts=0"
-        "Include_launcher=0"
-        "Include_test=0"
-        "Include_pip=1"
-        "Include_lib=1"
-    )
-    Start-Process -FilePath $installerPath -ArgumentList $installArgs -Wait -NoNewWindow
-    if (-not (Test-Path (Join-Path $PythonInstallDir "python.exe"))) {
-        Write-Host "ERROR: Python installation failed." -ForegroundColor Red
-        Write-Host "Try running: $installerPath"
-        exit 1
+# 1. MESHXCAD_PYTHON - explicit path to python.exe
+if ($env:MESHXCAD_PYTHON) {
+    Write-Host "MESHXCAD_PYTHON is set: $($env:MESHXCAD_PYTHON)"
+    if (Test-Path $env:MESHXCAD_PYTHON) {
+        if (Test-PythonExe $env:MESHXCAD_PYTHON $RequiredVer) {
+            $Python = $env:MESHXCAD_PYTHON
+            Write-Host "  Matched Python $RequiredVer" -ForegroundColor Green
+        } else {
+            Write-Host "  WARNING: exists but is not Python $RequiredVer" -ForegroundColor Yellow
+        }
+    } else {
+        Write-Host "  WARNING: file not found" -ForegroundColor Yellow
     }
-    Write-Host "Python installed successfully." -ForegroundColor Green
-} else {
-    Write-Host "Python already installed at $PythonInstallDir"
 }
 
-# Use the locally installed Python
-$Python = Join-Path $PythonInstallDir "python.exe"
+# 2. MESHXCAD_PYTHON_DIR - directory containing python.exe
+if (-not $Python -and $env:MESHXCAD_PYTHON_DIR) {
+    Write-Host "MESHXCAD_PYTHON_DIR is set: $($env:MESHXCAD_PYTHON_DIR)"
+    $candidate = Join-Path $env:MESHXCAD_PYTHON_DIR "python.exe"
+    if (Test-Path $candidate) {
+        if (Test-PythonExe $candidate $RequiredVer) {
+            $Python = $candidate
+            Write-Host "  Matched Python $RequiredVer" -ForegroundColor Green
+        } else {
+            Write-Host "  WARNING: python.exe found but is not Python $RequiredVer" -ForegroundColor Yellow
+        }
+    } else {
+        Write-Host "  WARNING: python.exe not found in directory" -ForegroundColor Yellow
+    }
+}
 
-# Verify
-$verOutput = & $Python --version 2>&1 | Out-String
-Write-Host "Using $($verOutput.Trim())" -ForegroundColor Cyan
-if ($verOutput -notmatch "Python $([regex]::Escape($RequiredMajorMinor))") {
-    Write-Host "ERROR: Installed Python does not match required $RequiredMajorMinor" -ForegroundColor Red
+# 3. Search PATH for matching version
+if (-not $Python) {
+    $ErrorActionPreference = "Continue"
+    foreach ($candidate in @("python", "python3", "py")) {
+        try {
+            $cmd = Get-Command $candidate -ErrorAction SilentlyContinue
+            if ($cmd) {
+                if (Test-PythonExe $cmd.Source $RequiredVer) {
+                    $Python = $cmd.Source
+                    Write-Host "Found on PATH: $Python" -ForegroundColor Green
+                    break
+                }
+            }
+        } catch {}
+    }
+    $ErrorActionPreference = "Stop"
+}
+
+# 4. Fallback: any Python 3 on PATH (if no specific version required by FreeCAD)
+if (-not $Python -and -not $FreecadPyVer) {
+    $ErrorActionPreference = "Continue"
+    foreach ($candidate in @("python", "python3", "py")) {
+        try {
+            $cmd = Get-Command $candidate -ErrorAction SilentlyContinue
+            if ($cmd) {
+                $out = & $cmd.Source --version 2>&1 | Out-String
+                if ($out -match "Python 3\.") {
+                    $Python = $cmd.Source
+                    Write-Host "Fallback: using $Python" -ForegroundColor Yellow
+                    break
+                }
+            }
+        } catch {}
+    }
+    $ErrorActionPreference = "Stop"
+}
+
+if (-not $Python) {
+    Write-Host ""
+    Write-Host "ERROR: Python $RequiredVer not found." -ForegroundColor Red
+    Write-Host ""
+    Write-Host "Set one of these environment variables before running this script:" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host '  $env:MESHXCAD_PYTHON = "C:\path\to\python.exe"'
+    Write-Host '  $env:MESHXCAD_PYTHON_DIR = "C:\path\to\python\directory"'
+    Write-Host ""
+    Write-Host "Example:"
+    Write-Host '  $env:MESHXCAD_PYTHON = "C:\Python311\python.exe"'
+    Write-Host "  .\venv.ps1"
+    Write-Host ""
     exit 1
 }
 
-function Invoke-Python {
-    param([string]$PythonCmd, [string[]]$Arguments)
-    & $PythonCmd @Arguments
-}
+# Show which Python we are using
+$verOutput = & $Python --version 2>&1 | Out-String
+Write-Host "Using $($verOutput.Trim()) at $Python" -ForegroundColor Cyan
 
 # ============================================================
 # 3. Create the virtual environment
@@ -362,7 +393,7 @@ $fcStatus = if ($FreecadLib) { "yes" } else { "no" }
 Write-Host ""
 Write-Host "============================================" -ForegroundColor Green
 Write-Host " MeshXCAD virtual environment ready!" -ForegroundColor Green
-Write-Host " Python $RequiredMajorMinor | FreeCAD: $fcStatus" -ForegroundColor Green
+Write-Host " Python $RequiredVer | FreeCAD: $fcStatus" -ForegroundColor Green
 Write-Host "============================================" -ForegroundColor Green
 Write-Host ""
 Write-Host "Activate it with:"
