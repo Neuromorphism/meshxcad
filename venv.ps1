@@ -329,7 +329,7 @@ pip install -e . @PipExtraArgs
 # ============================================================
 if ($FreecadLib) {
     # Write a .pth file so FreeCAD is importable automatically in the venv
-    $sitePackages = python -c "import site; print(site.getsitepackages()[0])"
+    $sitePackages = python -c 'import site; print(site.getsitepackages()[0])'
     $pthFile = Join-Path $sitePackages "freecad_path.pth"
     Set-Content -Path $pthFile -Value $FreecadLib
     Write-Host ""
@@ -338,7 +338,7 @@ if ($FreecadLib) {
     # Verify FreeCAD actually imports
     Write-Host "Verifying FreeCAD import ..."
     try {
-        $fcVer = python -c "import FreeCAD; print(f'  FreeCAD {FreeCAD.Version()[0]}.{FreeCAD.Version()[1]} OK')" 2>$null
+        $fcVer = python -c 'import FreeCAD; print(f"  FreeCAD {FreeCAD.Version()[0]}.{FreeCAD.Version()[1]} OK")' 2>$null
         if ($LASTEXITCODE -eq 0 -and $fcVer) {
             Write-Host $fcVer -ForegroundColor Green
             Write-Host "  FreeCAD is working." -ForegroundColor Green
@@ -367,8 +367,8 @@ Write-Host "Activate it with:"
 Write-Host "  .\.venv\Scripts\Activate.ps1"
 Write-Host ""
 Write-Host "Run tests:"
-Write-Host "  pytest tests\"
+Write-Host '  pytest tests\'
 Write-Host ""
 Write-Host "CLI usage:"
-Write-Host "  python -m meshxcad.cli transfer --plain model.step --detail scan.stl --output result.stl"
+Write-Host '  python -m meshxcad.cli transfer --plain model.step --detail scan.stl --output result.stl'
 Write-Host ""
