@@ -6,11 +6,32 @@ import sys
 import time
 
 
+def _print_diagnostics(plain_verts, detail_verts, label="Diagnostics"):
+    """Print bounding box and scale info to help debug alignment issues."""
+    import numpy as np
+
+    p_min, p_max = plain_verts.min(axis=0), plain_verts.max(axis=0)
+    d_min, d_max = detail_verts.min(axis=0), detail_verts.max(axis=0)
+    p_diag = float(np.linalg.norm(p_max - p_min))
+    d_diag = float(np.linalg.norm(d_max - d_min))
+
+    print(f"  {label}:")
+    print(f"    Plain  bbox: ({p_min[0]:.2f},{p_min[1]:.2f},{p_min[2]:.2f}) "
+          f"to ({p_max[0]:.2f},{p_max[1]:.2f},{p_max[2]:.2f})  "
+          f"diag={p_diag:.4f}")
+    print(f"    Detail bbox: ({d_min[0]:.2f},{d_min[1]:.2f},{d_min[2]:.2f}) "
+          f"to ({d_max[0]:.2f},{d_max[1]:.2f},{d_max[2]:.2f})  "
+          f"diag={d_diag:.4f}")
+    if p_diag > 1e-12:
+        print(f"    Scale ratio (detail/plain): {d_diag/p_diag:.4f}")
+
+
 def cmd_transfer(args):
     """Run detail transfer from a detailed mesh onto a plain CAD model."""
     plain_path = args.plain
     detail_path = args.detail
     output_path = args.output
+    output_ext = os.path.splitext(output_path)[1].lower()
 
     plain_ext = os.path.splitext(plain_path)[1].lower()
     detail_ext = os.path.splitext(detail_path)[1].lower()
@@ -22,7 +43,10 @@ def cmd_transfer(args):
     plain_is_cad = plain_ext in cad_exts
     detail_is_mesh = detail_ext in mesh_exts
 
-    if plain_is_cad and detail_is_mesh:
+    # STEP B-rep output: use the brep_transfer pipeline
+    if output_ext in (".step", ".stp") and plain_is_cad and detail_is_mesh:
+        _transfer_to_step_brep(plain_path, detail_path, output_path, args)
+    elif plain_is_cad and detail_is_mesh:
         _transfer_mesh_detail_to_cad(plain_path, detail_path, output_path, args)
     elif plain_ext in mesh_exts and detail_ext in mesh_exts:
         _transfer_mesh_to_mesh(plain_path, detail_path, output_path, args)
@@ -33,10 +57,30 @@ def cmd_transfer(args):
         sys.exit(1)
 
 
+def _transfer_to_step_brep(plain_cad_path, detail_mesh_path, output_path, args):
+    """Transfer detail from mesh onto STEP model, producing a B-rep STEP file."""
+    from .brep_transfer import transfer_to_step
+
+    print(f"Loading plain CAD: {plain_cad_path}")
+    print(f"Loading detail mesh: {detail_mesh_path}")
+    print("Analysing differences and building CAD operations...")
+
+    t0 = time.time()
+    result = transfer_to_step(
+        plain_cad_path, detail_mesh_path, output_path,
+        linear_deflection=args.deflection,
+    )
+    elapsed = time.time() - t0
+
+    print(f"  Done in {elapsed:.2f}s — {result['n_operations']} B-rep operations applied")
+    print(f"Saved STEP B-rep: {output_path}")
+
+
 def _transfer_mesh_detail_to_cad(plain_cad_path, detail_mesh_path, output_path, args):
     """Transfer detail from STL mesh onto a STEP/CAD model."""
     from . import cad_io, mesh_io, detail_transfer
     from .stl_io import read_binary_stl
+    import numpy as np
 
     print(f"Loading plain CAD: {plain_cad_path}")
     doc = cad_io.load_cad(plain_cad_path)
@@ -57,7 +101,9 @@ def _transfer_mesh_detail_to_cad(plain_cad_path, detail_mesh_path, output_path, 
         detail_verts, detail_faces = mesh_io.mesh_to_numpy(detail_fc_mesh)
     print(f"  Loaded: {len(detail_verts)} vertices, {len(detail_faces)} faces")
 
-    print("Transferring detail...")
+    _print_diagnostics(plain_verts, detail_verts)
+
+    print("Transferring detail (with pre-alignment)...")
     t0 = time.time()
     result_verts = detail_transfer.transfer_mesh_detail_to_mesh(
         plain_verts, plain_faces, detail_verts, detail_faces
@@ -67,7 +113,6 @@ def _transfer_mesh_detail_to_cad(plain_cad_path, detail_mesh_path, output_path, 
 
     # Compute improvement metric
     from .alignment import find_correspondences
-    import numpy as np
     _, _, bd = find_correspondences(plain_verts, detail_verts)
     _, _, rd = find_correspondences(result_verts, detail_verts)
     bm, rm = float(np.mean(bd)), float(np.mean(rd))
@@ -93,7 +138,9 @@ def _transfer_mesh_to_mesh(plain_path, detail_path, output_path, args):
     detail_verts, detail_faces = read_binary_stl(detail_path)
     print(f"  Loaded: {len(detail_verts)} vertices, {len(detail_faces)} faces")
 
-    print("Transferring detail...")
+    _print_diagnostics(plain_verts, detail_verts)
+
+    print("Transferring detail (with pre-alignment)...")
     t0 = time.time()
     result_verts = detail_transfer.transfer_mesh_detail_to_mesh(
         plain_verts, plain_faces, detail_verts, detail_faces
@@ -119,6 +166,9 @@ def _save_output(verts, faces, output_path):
     if ext == ".stl":
         from .stl_io import write_binary_stl
         write_binary_stl(output_path, verts, faces)
+    elif ext in (".step", ".stp"):
+        from .step_io import write_step
+        write_step(output_path, verts, faces)
     elif ext == ".fcstd":
         from . import mesh_io, cad_io
         fc_mesh = mesh_io.numpy_to_mesh(verts, faces)
@@ -129,7 +179,7 @@ def _save_output(verts, faces, output_path):
         cad_io.save_cad(doc, output_path)
         cad_io.close_document(doc)
     else:
-        # Default to STL
+        print(f"Warning: unknown extension '{ext}', writing as STL")
         from .stl_io import write_binary_stl
         write_binary_stl(output_path, verts, faces)
 
@@ -156,7 +206,7 @@ def main():
     )
     p_transfer.add_argument(
         "--output", required=True,
-        help="Output path (.stl or .fcstd)",
+        help="Output path (.stl, .step, .stp, or .fcstd)",
     )
     p_transfer.add_argument(
         "--deflection", type=float, default=0.05,
