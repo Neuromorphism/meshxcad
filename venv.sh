@@ -286,29 +286,80 @@ echo "Creating virtual environment in $VENV_DIR (Python $PY_VERSION) ..."
 source "$VENV_DIR/bin/activate"
 
 # ============================================================
-# 4. Install dependencies
+# 4. Configure pip (mirror, SSL cert)
+# ============================================================
+PIP_EXTRA_ARGS=()
+
+# Mirror URL — use MIRROR_URL env var to point pip at a private PyPI mirror
+if [ -n "${MIRROR_URL:-}" ]; then
+    echo ""
+    echo "Using PyPI mirror: $MIRROR_URL"
+    PIP_EXTRA_ARGS+=("--index-url" "$MIRROR_URL")
+
+    # Write pip.conf so the mirror persists inside the venv
+    PIP_CONF_DIR="$VENV_DIR/pip.conf"
+    cat > "$PIP_CONF_DIR" <<PIPEOF
+[global]
+index-url = $MIRROR_URL
+PIPEOF
+    # Also set the env var so the upcoming pip bootstrap respects it
+    export PIP_INDEX_URL="$MIRROR_URL"
+fi
+
+# SSL certificate — use SSL_CERT_FILE env var for corporate/custom CAs
+if [ -n "${SSL_CERT_FILE:-}" ]; then
+    if [ -f "$SSL_CERT_FILE" ]; then
+        echo "Using SSL certificate: $SSL_CERT_FILE"
+        PIP_EXTRA_ARGS+=("--cert" "$SSL_CERT_FILE")
+
+        # Append to pip.conf so it persists
+        PIP_CONF_DIR="$VENV_DIR/pip.conf"
+        if [ -f "$PIP_CONF_DIR" ]; then
+            # Append under [global] if file already exists
+            if ! grep -q "^cert" "$PIP_CONF_DIR" 2>/dev/null; then
+                echo "cert = $SSL_CERT_FILE" >> "$PIP_CONF_DIR"
+            fi
+        else
+            cat > "$PIP_CONF_DIR" <<PIPEOF
+[global]
+cert = $SSL_CERT_FILE
+PIPEOF
+        fi
+
+        # Also export so pip's internal get-pip / ensurepip respects it
+        export PIP_CERT="$SSL_CERT_FILE"
+        # Python's ssl module also checks this
+        export SSL_CERT_FILE="$SSL_CERT_FILE"
+    else
+        echo "WARNING: SSL_CERT_FILE is set to '$SSL_CERT_FILE' but file does not exist."
+        echo "         Continuing without custom certificate."
+    fi
+fi
+
+# ============================================================
+# 5. Install dependencies
 # ============================================================
 echo ""
 echo "Upgrading pip ..."
-pip install --upgrade pip
+pip install --upgrade pip "${PIP_EXTRA_ARGS[@]}"
 
 echo "Installing core dependencies ..."
-pip install numpy scipy
+pip install numpy scipy "${PIP_EXTRA_ARGS[@]}"
 
 echo "Installing visualization dependencies ..."
-pip install matplotlib
+pip install matplotlib "${PIP_EXTRA_ARGS[@]}"
 
 echo "Installing OpenCASCADE Python bindings ..."
-pip install cadquery
+pip install cadquery "${PIP_EXTRA_ARGS[@]}"
 
 echo "Installing test dependencies ..."
-pip install pytest
+pip install pytest "${PIP_EXTRA_ARGS[@]}"
 
 echo "Installing meshxcad in editable mode ..."
-pip install -e .
+pip install -e . "${PIP_EXTRA_ARGS[@]}"
 
 # ============================================================
-# 5. Configure FreeCAD PYTHONPATH
+# 6. Configure FreeCAD PYTHONPATH
 # ============================================================
 if [ -n "$FREECAD_LIB" ]; then
     # Write an activation hook so FreeCAD is importable automatically
@@ -328,7 +379,7 @@ if [ -n "$FREECAD_LIB" ]; then
 fi
 
 # ============================================================
-# 6. Summary
+# 7. Summary
 # ============================================================
 echo ""
 echo "============================================"

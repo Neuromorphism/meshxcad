@@ -213,29 +213,80 @@ Invoke-Python $Python @("-m", "venv", $VenvDir)
 & "$VenvDir\Scripts\Activate.ps1"
 
 # ============================================================
-# 4. Install dependencies
+# 4. Configure pip (mirror, SSL cert)
+# ============================================================
+$PipExtraArgs = @()
+
+# Mirror URL — use MIRROR_URL env var to point pip at a private PyPI mirror
+if ($env:MIRROR_URL) {
+    Write-Host ""
+    Write-Host "Using PyPI mirror: $($env:MIRROR_URL)"
+    $PipExtraArgs += @("--index-url", $env:MIRROR_URL)
+
+    # Write pip.ini so the mirror persists inside the venv
+    $pipIniDir = "$VenvDir"
+    $pipIni = Join-Path $pipIniDir "pip.ini"
+    @"
+[global]
+index-url = $($env:MIRROR_URL)
+"@ | Set-Content -Path $pipIni
+
+    # Also set the env var so the upcoming pip bootstrap respects it
+    $env:PIP_INDEX_URL = $env:MIRROR_URL
+}
+
+# SSL certificate — use SSL_CERT_FILE env var for corporate/custom CAs
+if ($env:SSL_CERT_FILE) {
+    if (Test-Path $env:SSL_CERT_FILE) {
+        Write-Host "Using SSL certificate: $($env:SSL_CERT_FILE)"
+        $PipExtraArgs += @("--cert", $env:SSL_CERT_FILE)
+
+        # Append to pip.ini so it persists
+        $pipIni = Join-Path $VenvDir "pip.ini"
+        if (Test-Path $pipIni) {
+            $content = Get-Content $pipIni -Raw
+            if ($content -notmatch "(?m)^cert\s*=") {
+                Add-Content -Path $pipIni -Value "cert = $($env:SSL_CERT_FILE)"
+            }
+        } else {
+            @"
+[global]
+cert = $($env:SSL_CERT_FILE)
+"@ | Set-Content -Path $pipIni
+        }
+
+        # Also export so pip's internal operations respect it
+        $env:PIP_CERT = $env:SSL_CERT_FILE
+    } else {
+        Write-Host "WARNING: SSL_CERT_FILE is set to '$($env:SSL_CERT_FILE)' but file does not exist." -ForegroundColor Yellow
+        Write-Host "         Continuing without custom certificate."
+    }
+}
+
+# ============================================================
+# 5. Install dependencies
 # ============================================================
 Write-Host ""
 Write-Host "Upgrading pip ..."
-pip install --upgrade pip
+pip install --upgrade pip @PipExtraArgs
 
 Write-Host "Installing core dependencies ..."
-pip install numpy scipy
+pip install numpy scipy @PipExtraArgs
 
 Write-Host "Installing visualization dependencies ..."
-pip install matplotlib
+pip install matplotlib @PipExtraArgs
 
 Write-Host "Installing OpenCASCADE Python bindings ..."
-pip install cadquery
+pip install cadquery @PipExtraArgs
 
 Write-Host "Installing test dependencies ..."
-pip install pytest
+pip install pytest @PipExtraArgs
 
 Write-Host "Installing meshxcad in editable mode ..."
-pip install -e .
+pip install -e . @PipExtraArgs
 
 # ============================================================
-# 5. Configure FreeCAD PYTHONPATH
+# 6. Configure FreeCAD PYTHONPATH
 # ============================================================
 if ($FreecadLib) {
     # Write a .pth file so FreeCAD is importable automatically in the venv
@@ -264,7 +315,7 @@ if ($FreecadLib) {
 }
 
 # ============================================================
-# 6. Summary
+# 7. Summary
 # ============================================================
 $fcStatus = if ($FreecadLib) { "yes" } else { "no" }
 Write-Host ""
