@@ -116,30 +116,43 @@ $Required = $FreecadPyVer
 # Python version detection command (kept in a variable to avoid quoting issues)
 $pyVersionCmd = 'import sys; print(str(sys.version_info.major) + "." + str(sys.version_info.minor))'
 
+function Test-PythonCandidate {
+    # Run a candidate python command with --version and return major.minor if it matches
+    param([string]$Candidate, [string[]]$ExtraArgs, [string]$Ver)
+
+    $ErrorActionPreference = "Continue"
+    $output = $null
+    try {
+        if ($ExtraArgs) {
+            $output = & $Candidate @ExtraArgs --version 2>&1 | Out-String
+        } else {
+            $output = & $Candidate --version 2>&1 | Out-String
+        }
+    } catch {
+        return $false
+    }
+    if (-not $output) { return $false }
+    if ($output -match 'Python (\d+)\.(\d+)') {
+        $detected = $Matches[1] + "." + $Matches[2]
+        if ($detected -eq $Ver) { return $true }
+    }
+    return $false
+}
+
 function Find-PythonVersion {
     param([string]$Ver)
 
-    # Locally relax error handling so that missing executables do not abort
-    $ErrorActionPreference = "Continue"
-    $cmd = 'import sys; print(str(sys.version_info.major) + "." + str(sys.version_info.minor))'
-
     # Try the Windows Python Launcher (py.exe) first - most reliable on Windows
-    try {
-        $testVer = & py "-$Ver" -c $cmd 2>&1 | Where-Object { $_ -match '^\d+\.\d+$' } | Select-Object -First 1
-        if ($testVer -and $testVer.ToString().Trim() -eq $Ver) {
-            return "py|-$Ver"
-        }
-    } catch {}
+    if (Test-PythonCandidate "py" @("-$Ver") $Ver) {
+        return "py|-$Ver"
+    }
 
     # Try direct binary names
     $verNoDot = $Ver -replace '\.', ''
     foreach ($candidate in @("python$verNoDot", "python$Ver", "python3", "python")) {
-        try {
-            $testVer = & $candidate -c $cmd 2>&1 | Where-Object { $_ -match '^\d+\.\d+$' } | Select-Object -First 1
-            if ($testVer -and $testVer.ToString().Trim() -eq $Ver) {
-                return $candidate
-            }
-        } catch {}
+        if (Test-PythonCandidate $candidate @() $Ver) {
+            return $candidate
+        }
     }
 
     return $null
