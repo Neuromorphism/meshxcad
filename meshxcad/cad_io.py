@@ -4,9 +4,35 @@ import os
 
 
 def load_cad(filepath):
-    """Load a FreeCAD document. Returns the FreeCAD document object."""
+    """Load a FreeCAD document or STEP/IGES file. Returns the FreeCAD document object."""
     import FreeCAD
-    doc = FreeCAD.openDocument(filepath)
+    ext = os.path.splitext(filepath)[1].lower()
+    if ext in (".step", ".stp"):
+        return load_step(filepath)
+    elif ext in (".iges", ".igs"):
+        return load_iges(filepath)
+    else:
+        doc = FreeCAD.openDocument(filepath)
+        return doc
+
+
+def load_step(filepath):
+    """Load a STEP file into a new FreeCAD document."""
+    import FreeCAD
+    import Part
+    doc = FreeCAD.newDocument("StepImport")
+    Part.insert(filepath, doc.Name)
+    doc.recompute()
+    return doc
+
+
+def load_iges(filepath):
+    """Load an IGES file into a new FreeCAD document."""
+    import FreeCAD
+    import Part
+    doc = FreeCAD.newDocument("IgesImport")
+    Part.insert(filepath, doc.Name)
+    doc.recompute()
     return doc
 
 
