@@ -286,7 +286,7 @@ echo "Creating virtual environment in $VENV_DIR (Python $PY_VERSION) ..."
 source "$VENV_DIR/bin/activate"
 
 # ============================================================
-# 4. Configure pip (SSL cert)
+# 4. Configure pip (SSL cert & mirror/trusted-host)
 # ============================================================
 PIP_EXTRA_ARGS=()
 
@@ -311,6 +311,59 @@ PIPEOF
         echo "WARNING: SSL_CERT_FILE is set to '$SSL_CERT_FILE' but file does not exist."
         echo "         Continuing without custom certificate."
     fi
+fi
+
+# Detect pip mirror (Nexus, Artifactory, devpi, etc.) and add --trusted-host
+# so that self-signed or corporate-CA HTTPS mirrors work out of the box.
+detect_pip_mirror_host() {
+    local index_url=""
+
+    # 1. Check PIP_INDEX_URL environment variable
+    if [ -n "${PIP_INDEX_URL:-}" ]; then
+        index_url="$PIP_INDEX_URL"
+    fi
+
+    # 2. Check PIP_EXTRA_INDEX_URL environment variable
+    local extra_index_url="${PIP_EXTRA_INDEX_URL:-}"
+
+    # 3. Check pip config files for index-url / extra-index-url
+    if [ -z "$index_url" ]; then
+        for cfg in "$HOME/.pip/pip.conf" "$HOME/.config/pip/pip.conf" "/etc/pip.conf"; do
+            if [ -f "$cfg" ]; then
+                local url
+                url=$(grep -E '^\s*index-url\s*=' "$cfg" 2>/dev/null | head -1 | sed 's/^[^=]*=\s*//' | tr -d '[:space:]')
+                if [ -n "$url" ]; then
+                    index_url="$url"
+                fi
+                if [ -z "$extra_index_url" ]; then
+                    extra_index_url=$(grep -E '^\s*extra-index-url\s*=' "$cfg" 2>/dev/null | head -1 | sed 's/^[^=]*=\s*//' | tr -d '[:space:]')
+                fi
+                break
+            fi
+        done
+    fi
+
+    # Extract hostnames from URLs that are NOT pypi.org
+    local hosts=()
+    for url in $index_url $extra_index_url; do
+        local host
+        host=$(echo "$url" | sed -E 's|^https?://([^/:]+).*|\1|')
+        if [ -n "$host" ] && [[ "$host" != *pypi.org ]] && [[ "$host" != *pythonhosted.org ]]; then
+            hosts+=("$host")
+        fi
+    done
+
+    # Deduplicate
+    printf '%s\n' "${hosts[@]}" | sort -u
+}
+
+MIRROR_HOSTS=$(detect_pip_mirror_host)
+if [ -n "$MIRROR_HOSTS" ]; then
+    echo "Detected pip mirror host(s) — adding --trusted-host:"
+    while IFS= read -r host; do
+        echo "  $host"
+        PIP_EXTRA_ARGS+=("--trusted-host" "$host")
+    done <<< "$MIRROR_HOSTS"
 fi
 
 # ============================================================

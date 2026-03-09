@@ -213,7 +213,7 @@ Invoke-Python $Python @("-m", "venv", $VenvDir)
 & "$VenvDir\Scripts\Activate.ps1"
 
 # ============================================================
-# 4. Configure pip (SSL cert)
+# 4. Configure pip (SSL cert & mirror/trusted-host)
 # ============================================================
 $PipExtraArgs = @()
 
@@ -237,6 +237,68 @@ cert = $($env:SSL_CERT_FILE)
     } else {
         Write-Host "WARNING: SSL_CERT_FILE is set to '$($env:SSL_CERT_FILE)' but file does not exist." -ForegroundColor Yellow
         Write-Host "         Continuing without custom certificate."
+    }
+}
+
+# Detect pip mirror (Nexus, Artifactory, devpi, etc.) and add --trusted-host
+# so that self-signed or corporate-CA HTTPS mirrors work out of the box.
+function Get-PipMirrorHosts {
+    $indexUrls = @()
+
+    # 1. Check PIP_INDEX_URL environment variable
+    if ($env:PIP_INDEX_URL) {
+        $indexUrls += $env:PIP_INDEX_URL
+    }
+
+    # 2. Check PIP_EXTRA_INDEX_URL environment variable
+    if ($env:PIP_EXTRA_INDEX_URL) {
+        $indexUrls += $env:PIP_EXTRA_INDEX_URL
+    }
+
+    # 3. Check pip config files for index-url / extra-index-url
+    if ($indexUrls.Count -eq 0) {
+        $pipConfigs = @(
+            "$env:APPDATA\pip\pip.ini",
+            "$env:USERPROFILE\pip\pip.ini",
+            "$env:APPDATA\pip\pip.conf",
+            "$env:USERPROFILE\.config\pip\pip.conf"
+        )
+        foreach ($cfg in $pipConfigs) {
+            if ($cfg -and (Test-Path $cfg -ErrorAction SilentlyContinue)) {
+                $content = Get-Content $cfg -ErrorAction SilentlyContinue
+                foreach ($line in $content) {
+                    if ($line -match '^\s*index-url\s*=\s*(.+)$') {
+                        $indexUrls += $Matches[1].Trim()
+                    }
+                    if ($line -match '^\s*extra-index-url\s*=\s*(.+)$') {
+                        $indexUrls += $Matches[1].Trim()
+                    }
+                }
+                break
+            }
+        }
+    }
+
+    # Extract hostnames from URLs that are NOT pypi.org
+    $hosts = @()
+    foreach ($url in $indexUrls) {
+        if ($url -match '^https?://([^/:]+)') {
+            $h = $Matches[1]
+            if ($h -notlike '*pypi.org' -and $h -notlike '*pythonhosted.org') {
+                $hosts += $h
+            }
+        }
+    }
+
+    return ($hosts | Select-Object -Unique)
+}
+
+$MirrorHosts = Get-PipMirrorHosts
+if ($MirrorHosts) {
+    Write-Host "Detected pip mirror host(s) — adding --trusted-host:" -ForegroundColor Cyan
+    foreach ($h in $MirrorHosts) {
+        Write-Host "  $h"
+        $PipExtraArgs += @("--trusted-host", $h)
     }
 }
 
