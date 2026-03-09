@@ -118,7 +118,7 @@ function Find-PythonVersion {
 
     # Try the Windows Python Launcher (py.exe) first — most reliable on Windows
     try {
-        $testVer = & py "-$Ver" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>$null
+        $testVer = & py "-$Ver" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>$null
         if ($testVer -eq $Ver) {
             return "py|-$Ver"
         }
@@ -127,7 +127,7 @@ function Find-PythonVersion {
     # Try direct binary names
     foreach ($candidate in @("python$($Ver -replace '\.', '')", "python$Ver", "python")) {
         try {
-            $testVer = & $candidate -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>$null
+            $testVer = & $candidate -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>$null
             if ($testVer -eq $Ver) {
                 return $candidate
             }
@@ -190,7 +190,7 @@ if (-not $Python) {
     exit 1
 }
 
-$PyVersion = Invoke-Python $Python @("-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+$PyVersion = Invoke-Python $Python @("-c", 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
 Write-Host "Using Python $PyVersion" -ForegroundColor Cyan
 
 if ($Required -and $PyVersion -ne $Required) {
