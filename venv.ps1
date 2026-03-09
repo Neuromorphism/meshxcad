@@ -119,20 +119,24 @@ $pyVersionCmd = 'import sys; print(str(sys.version_info.major) + "." + str(sys.v
 function Find-PythonVersion {
     param([string]$Ver)
 
+    # Locally relax error handling so that missing executables do not abort
+    $ErrorActionPreference = "Continue"
+    $cmd = 'import sys; print(str(sys.version_info.major) + "." + str(sys.version_info.minor))'
+
     # Try the Windows Python Launcher (py.exe) first - most reliable on Windows
     try {
-        $testVer = & py "-$Ver" -c $pyVersionCmd 2>$null
-        if ($testVer -eq $Ver) {
+        $testVer = & py "-$Ver" -c $cmd 2>&1 | Where-Object { $_ -match '^\d+\.\d+$' } | Select-Object -First 1
+        if ($testVer -and $testVer.ToString().Trim() -eq $Ver) {
             return "py|-$Ver"
         }
     } catch {}
 
     # Try direct binary names
     $verNoDot = $Ver -replace '\.', ''
-    foreach ($candidate in @("python$verNoDot", "python$Ver", "python")) {
+    foreach ($candidate in @("python$verNoDot", "python$Ver", "python3", "python")) {
         try {
-            $testVer = & $candidate -c $pyVersionCmd 2>$null
-            if ($testVer -eq $Ver) {
+            $testVer = & $candidate -c $cmd 2>&1 | Where-Object { $_ -match '^\d+\.\d+$' } | Select-Object -First 1
+            if ($testVer -and $testVer.ToString().Trim() -eq $Ver) {
                 return $candidate
             }
         } catch {}
