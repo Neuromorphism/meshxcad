@@ -108,116 +108,93 @@ if ($FreecadPyVer) {
 }
 
 # ============================================================
-# 2. Find or install the required Python version
+# 2. Download and install Python 3.11
 # ============================================================
-$Python = $null
-$Required = $FreecadPyVer
+$RequiredMajorMinor = if ($FreecadPyVer) { $FreecadPyVer } else { "3.11" }
+$PythonInstallDir = Join-Path $PSScriptRoot ".python"
 
-# Python version detection command (kept in a variable to avoid quoting issues)
-$pyVersionCmd = 'import sys; print(str(sys.version_info.major) + "." + str(sys.version_info.minor))'
+Write-Host ""
+Write-Host "--- Installing Python $RequiredMajorMinor ---" -ForegroundColor Cyan
 
-function Test-PythonCandidate {
-    # Run a candidate python command with --version and return major.minor if it matches
-    param([string]$Candidate, [string[]]$ExtraArgs, [string]$Ver)
+# Find the latest micro release of the required version from python.org
+function Get-LatestPythonUrl {
+    param([string]$MajorMinor)
 
-    $ErrorActionPreference = "Continue"
-    $output = $null
-    try {
-        if ($ExtraArgs) {
-            $output = & $Candidate @ExtraArgs --version 2>&1 | Out-String
-        } else {
-            $output = & $Candidate --version 2>&1 | Out-String
-        }
-    } catch {
-        return $false
+    Write-Host "Querying python.org for latest Python $MajorMinor release ..."
+    $releasesPage = Invoke-WebRequest -Uri "https://www.python.org/downloads/" -UseBasicParsing
+    $pattern = "python-($([regex]::Escape($MajorMinor))\.\d+)-"
+
+    # Find all matching version strings on the downloads page
+    $versions = @()
+    foreach ($match in [regex]::Matches($releasesPage.Content, $pattern)) {
+        $versions += $match.Groups[1].Value
     }
-    if (-not $output) { return $false }
-    if ($output -match 'Python (\d+)\.(\d+)') {
-        $detected = $Matches[1] + "." + $Matches[2]
-        if ($detected -eq $Ver) { return $true }
+    $versions = $versions | Sort-Object { [version]$_ } -Descending | Select-Object -Unique
+    if ($versions.Count -eq 0) {
+        Write-Host "ERROR: Could not find Python $MajorMinor on python.org" -ForegroundColor Red
+        exit 1
     }
-    return $false
+    $latestVer = $versions[0]
+    Write-Host "Latest release: Python $latestVer"
+
+    # Build the installer URL (64-bit embeddable or full installer)
+    $arch = if ([Environment]::Is64BitOperatingSystem) { "amd64" } else { "win32" }
+    $installerUrl = "https://www.python.org/ftp/python/$latestVer/python-$latestVer-$arch.exe"
+    return @{ Version = $latestVer; Url = $installerUrl }
 }
 
-function Find-PythonVersion {
-    param([string]$Ver)
+$pyInfo = Get-LatestPythonUrl $RequiredMajorMinor
+$installerPath = Join-Path $env:TEMP "python-$($pyInfo.Version)-installer.exe"
 
-    # Try the Windows Python Launcher (py.exe) first - most reliable on Windows
-    if (Test-PythonCandidate "py" @("-$Ver") $Ver) {
-        return "py|-$Ver"
+# Download the installer
+if (-not (Test-Path $installerPath)) {
+    Write-Host "Downloading Python $($pyInfo.Version) ..."
+    Write-Host "  $($pyInfo.Url)"
+    Invoke-WebRequest -Uri $pyInfo.Url -OutFile $installerPath -UseBasicParsing
+    Write-Host "Download complete." -ForegroundColor Green
+} else {
+    Write-Host "Installer already downloaded: $installerPath"
+}
+
+# Install Python to a local directory (no admin required, no PATH pollution)
+if (-not (Test-Path (Join-Path $PythonInstallDir "python.exe"))) {
+    Write-Host "Installing Python $($pyInfo.Version) to $PythonInstallDir ..."
+    $installArgs = @(
+        "/quiet"
+        "InstallAllUsers=0"
+        "TargetDir=$PythonInstallDir"
+        "AssociateFiles=0"
+        "Shortcuts=0"
+        "Include_launcher=0"
+        "Include_test=0"
+        "Include_pip=1"
+        "Include_lib=1"
+    )
+    Start-Process -FilePath $installerPath -ArgumentList $installArgs -Wait -NoNewWindow
+    if (-not (Test-Path (Join-Path $PythonInstallDir "python.exe"))) {
+        Write-Host "ERROR: Python installation failed." -ForegroundColor Red
+        Write-Host "Try running: $installerPath"
+        exit 1
     }
+    Write-Host "Python installed successfully." -ForegroundColor Green
+} else {
+    Write-Host "Python already installed at $PythonInstallDir"
+}
 
-    # Try direct binary names
-    $verNoDot = $Ver -replace '\.', ''
-    foreach ($candidate in @("python$verNoDot", "python$Ver", "python3", "python")) {
-        if (Test-PythonCandidate $candidate @() $Ver) {
-            return $candidate
-        }
-    }
+# Use the locally installed Python
+$Python = Join-Path $PythonInstallDir "python.exe"
 
-    return $null
+# Verify
+$verOutput = & $Python --version 2>&1 | Out-String
+Write-Host "Using $($verOutput.Trim())" -ForegroundColor Cyan
+if ($verOutput -notmatch "Python $([regex]::Escape($RequiredMajorMinor))") {
+    Write-Host "ERROR: Installed Python does not match required $RequiredMajorMinor" -ForegroundColor Red
+    exit 1
 }
 
 function Invoke-Python {
-    # Helper to call python with the right syntax for "py -3.11" vs "python3.11"
     param([string]$PythonCmd, [string[]]$Arguments)
-    if ($PythonCmd -match '^py\|(.+)$') {
-        $pyArgs = @($Matches[1]) + $Arguments
-        & py @pyArgs
-    } else {
-        & $PythonCmd @Arguments
-    }
-}
-
-if ($Required) {
-    Write-Host ""
-    Write-Host "--- Locating Python $Required ---" -ForegroundColor Cyan
-    $Python = Find-PythonVersion $Required
-
-    if (-not $Python) {
-        Write-Host "Python $Required not found." -ForegroundColor Yellow
-        Write-Host ""
-        Write-Host "The Windows Python Launcher (py.exe) can manage multiple versions."
-        Write-Host "Please install Python $Required from:" -ForegroundColor Yellow
-        Write-Host "  https://www.python.org/downloads/" -ForegroundColor White
-        Write-Host ""
-        Write-Host "During installation, check 'Add Python to PATH' and 'Install py launcher'."
-        Write-Host "After installing, re-run this script."
-        Write-Host ""
-        Write-Host "Alternatively, use the Microsoft Store:"
-        $wingetPkg = "Python.Python." + ($Required -replace '\.', '.')
-        Write-Host "  winget install $wingetPkg"
-        Write-Host ""
-        Write-Host "Or use pyenv-win:"
-        Write-Host "  pyenv install $Required"
-        exit 1
-    }
-
-    Write-Host "Found Python $Required" -ForegroundColor Green
-} else {
-    # No FreeCAD version requirement - use system python
-    foreach ($candidate in @("python", "python3", "py")) {
-        try {
-            $ver = & $candidate --version 2>&1
-            if ($ver -match "Python 3") {
-                $Python = $candidate
-                break
-            }
-        } catch { continue }
-    }
-}
-
-if (-not $Python) {
-    Write-Host "Error: No suitable Python 3 interpreter found." -ForegroundColor Red
-    exit 1
-}
-
-$PyVersion = Invoke-Python $Python @("-c", $pyVersionCmd)
-Write-Host "Using Python $PyVersion" -ForegroundColor Cyan
-
-if ($Required -and $PyVersion -ne $Required) {
-    Write-Host "ERROR: Interpreter reports $PyVersion but FreeCAD needs $Required." -ForegroundColor Red
-    exit 1
+    & $PythonCmd @Arguments
 }
 
 # ============================================================
@@ -229,8 +206,8 @@ if (Test-Path $VenvDir) {
     Remove-Item -Recurse -Force $VenvDir
 }
 
-Write-Host "Creating virtual environment in $VenvDir (Python $PyVersion) ..."
-Invoke-Python $Python @("-m", "venv", $VenvDir)
+Write-Host "Creating virtual environment in $VenvDir ..."
+& $Python -m venv $VenvDir
 
 & "$VenvDir\Scripts\Activate.ps1"
 
@@ -385,7 +362,7 @@ $fcStatus = if ($FreecadLib) { "yes" } else { "no" }
 Write-Host ""
 Write-Host "============================================" -ForegroundColor Green
 Write-Host " MeshXCAD virtual environment ready!" -ForegroundColor Green
-Write-Host " Python $PyVersion | FreeCAD: $fcStatus" -ForegroundColor Green
+Write-Host " Python $RequiredMajorMinor | FreeCAD: $fcStatus" -ForegroundColor Green
 Write-Host "============================================" -ForegroundColor Green
 Write-Host ""
 Write-Host "Activate it with:"
