@@ -225,10 +225,7 @@ if ($env:SSL_CERT_FILE) {
 
         # Write pip.ini so the cert persists inside the venv
         $pipIni = Join-Path $VenvDir "pip.ini"
-        @"
-[global]
-cert = $($env:SSL_CERT_FILE)
-"@ | Set-Content -Path $pipIni
+        "[global]`ncert = $($env:SSL_CERT_FILE)" | Set-Content -Path $pipIni
 
         # Export so pip's requests library and other tools respect the CA
         $env:PIP_CERT = $env:SSL_CERT_FILE
