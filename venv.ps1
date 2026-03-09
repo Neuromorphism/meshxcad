@@ -338,7 +338,8 @@ if ($FreecadLib) {
     # Verify FreeCAD actually imports
     Write-Host "Verifying FreeCAD import ..."
     try {
-        $fcVer = python -c 'import FreeCAD; print(f"  FreeCAD {FreeCAD.Version()[0]}.{FreeCAD.Version()[1]} OK")' 2>$null
+        $pyCmd = 'import FreeCAD; v=FreeCAD.Version(); print("  FreeCAD " + v[0] + "." + v[1] + " OK")'
+        $fcVer = python -c $pyCmd 2>$null
         if ($LASTEXITCODE -eq 0 -and $fcVer) {
             Write-Host $fcVer -ForegroundColor Green
             Write-Host "  FreeCAD is working." -ForegroundColor Green
