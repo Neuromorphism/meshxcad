@@ -26,6 +26,34 @@ def _print_diagnostics(plain_verts, detail_verts, label="Diagnostics"):
         print(f"    Scale ratio (detail/plain): {d_diag/p_diag:.4f}")
 
 
+def _render_comparison_image(plain_verts, plain_faces,
+                              detail_verts, detail_faces,
+                              result_verts, result_faces,
+                              output_path):
+    """Render a 3-panel comparison image: Plain CAD | Detail Mesh | Result.
+
+    The image is saved next to the output file with a _comparison.png suffix.
+    """
+    from .render import render_comparison, HAS_MPL
+
+    if not HAS_MPL:
+        print("  matplotlib not available, skipping comparison image")
+        return
+
+    base, _ = os.path.splitext(output_path)
+    image_path = base + "_comparison.png"
+
+    meshes = [
+        (plain_verts, plain_faces),
+        (detail_verts, detail_faces),
+        (result_verts, result_faces),
+    ]
+    labels = ["Plain CAD", "Detail Mesh", "Result"]
+
+    render_comparison(meshes, labels, image_path,
+                      title="MeshXCAD Detail Transfer Comparison")
+
+
 def cmd_transfer(args):
     """Run detail transfer from a detailed mesh onto a plain CAD model."""
     plain_path = args.plain
@@ -60,11 +88,20 @@ def cmd_transfer(args):
 def _transfer_to_step_brep(plain_cad_path, detail_mesh_path, output_path, args):
     """Transfer detail from mesh onto STEP model, producing a B-rep STEP file."""
     from .brep_transfer import transfer_to_step
+    from .step_io import read_step, _read_step_shape, _tessellate_shape
+    from .stl_io import read_binary_stl
 
     print(f"Loading plain CAD: {plain_cad_path}")
     print(f"Loading detail mesh: {detail_mesh_path}")
-    print("Analysing differences and building CAD operations...")
 
+    # Keep meshes for comparison rendering
+    plain_verts, plain_faces = read_step(plain_cad_path,
+                                          linear_deflection=args.deflection)
+    detail_verts, detail_faces = read_binary_stl(detail_mesh_path)
+
+    _print_diagnostics(plain_verts, detail_verts)
+
+    print("Analysing differences and building CAD operations...")
     t0 = time.time()
     result = transfer_to_step(
         plain_cad_path, detail_mesh_path, output_path,
@@ -74,6 +111,22 @@ def _transfer_to_step_brep(plain_cad_path, detail_mesh_path, output_path, args):
 
     print(f"  Done in {elapsed:.2f}s — {result['n_operations']} B-rep operations applied")
     print(f"Saved STEP B-rep: {output_path}")
+
+    # Render comparison
+    if not args.no_render:
+        # Tessellate the result STEP for rendering
+        try:
+            result_shape = _read_step_shape(output_path)
+            result_verts, result_faces = _tessellate_shape(
+                result_shape, args.deflection, 0.5)
+        except Exception:
+            # If re-reading fails, use displaced plain mesh as fallback
+            result_verts, result_faces = plain_verts, plain_faces
+
+        _render_comparison_image(plain_verts, plain_faces,
+                                 detail_verts, detail_faces,
+                                 result_verts, result_faces,
+                                 output_path)
 
 
 def _transfer_mesh_detail_to_cad(plain_cad_path, detail_mesh_path, output_path, args):
@@ -123,6 +176,12 @@ def _transfer_mesh_detail_to_cad(plain_cad_path, detail_mesh_path, output_path, 
     _save_output(result_verts, plain_faces, output_path)
     print(f"Saved: {output_path}")
 
+    if not args.no_render:
+        _render_comparison_image(plain_verts, plain_faces,
+                                 detail_verts, detail_faces,
+                                 result_verts, plain_faces,
+                                 output_path)
+
 
 def _transfer_mesh_to_mesh(plain_path, detail_path, output_path, args):
     """Transfer detail between two STL meshes."""
@@ -158,6 +217,12 @@ def _transfer_mesh_to_mesh(plain_path, detail_path, output_path, args):
 
     _save_output(result_verts, plain_faces, output_path)
     print(f"Saved: {output_path}")
+
+    if not args.no_render:
+        _render_comparison_image(plain_verts, plain_faces,
+                                 detail_verts, detail_faces,
+                                 result_verts, plain_faces,
+                                 output_path)
 
 
 def _save_output(verts, faces, output_path):
@@ -211,6 +276,10 @@ def main():
     p_transfer.add_argument(
         "--deflection", type=float, default=0.05,
         help="Tessellation linear deflection for CAD models (default: 0.05)",
+    )
+    p_transfer.add_argument(
+        "--no-render", action="store_true", default=False,
+        help="Skip generating the comparison image",
     )
     p_transfer.set_defaults(func=cmd_transfer)
 
