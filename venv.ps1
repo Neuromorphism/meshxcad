@@ -1,4 +1,4 @@
-# venv.ps1 — Create a Python virtual environment for MeshXCAD on Windows
+# venv.ps1 - Create a Python virtual environment for MeshXCAD on Windows
 #
 # This script detects FreeCAD's required Python version and creates the venv
 # with a matching interpreter so that all features work out of the box.
@@ -113,21 +113,25 @@ if ($FreecadPyVer) {
 $Python = $null
 $Required = $FreecadPyVer
 
+# Python version detection command (kept in a variable to avoid quoting issues)
+$pyVersionCmd = 'import sys; print(str(sys.version_info.major) + "." + str(sys.version_info.minor))'
+
 function Find-PythonVersion {
     param([string]$Ver)
 
-    # Try the Windows Python Launcher (py.exe) first — most reliable on Windows
+    # Try the Windows Python Launcher (py.exe) first - most reliable on Windows
     try {
-        $testVer = & py "-$Ver" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>$null
+        $testVer = & py "-$Ver" -c $pyVersionCmd 2>$null
         if ($testVer -eq $Ver) {
             return "py|-$Ver"
         }
     } catch {}
 
     # Try direct binary names
-    foreach ($candidate in @("python$($Ver -replace '\.', '')", "python$Ver", "python")) {
+    $verNoDot = $Ver -replace '\.', ''
+    foreach ($candidate in @("python$verNoDot", "python$Ver", "python")) {
         try {
-            $testVer = & $candidate -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>$null
+            $testVer = & $candidate -c $pyVersionCmd 2>$null
             if ($testVer -eq $Ver) {
                 return $candidate
             }
@@ -164,7 +168,8 @@ if ($Required) {
         Write-Host "After installing, re-run this script."
         Write-Host ""
         Write-Host "Alternatively, use the Microsoft Store:"
-        Write-Host "  winget install Python.Python.$($Required -replace '\.', '.')"
+        $wingetPkg = "Python.Python." + ($Required -replace '\.', '.')
+        Write-Host "  winget install $wingetPkg"
         Write-Host ""
         Write-Host "Or use pyenv-win:"
         Write-Host "  pyenv install $Required"
@@ -173,7 +178,7 @@ if ($Required) {
 
     Write-Host "Found Python $Required" -ForegroundColor Green
 } else {
-    # No FreeCAD version requirement — use system python
+    # No FreeCAD version requirement - use system python
     foreach ($candidate in @("python", "python3", "py")) {
         try {
             $ver = & $candidate --version 2>&1
@@ -190,7 +195,7 @@ if (-not $Python) {
     exit 1
 }
 
-$PyVersion = Invoke-Python $Python @("-c", 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
+$PyVersion = Invoke-Python $Python @("-c", $pyVersionCmd)
 Write-Host "Using Python $PyVersion" -ForegroundColor Cyan
 
 if ($Required -and $PyVersion -ne $Required) {
@@ -217,7 +222,7 @@ Invoke-Python $Python @("-m", "venv", $VenvDir)
 # ============================================================
 $PipExtraArgs = @()
 
-# SSL certificate — use SSL_CERT_FILE env var for corporate/custom CAs
+# SSL certificate - use SSL_CERT_FILE env var for corporate/custom CAs
 if ($env:SSL_CERT_FILE) {
     if (Test-Path $env:SSL_CERT_FILE) {
         Write-Host "Using SSL certificate: $($env:SSL_CERT_FILE)"
@@ -225,14 +230,15 @@ if ($env:SSL_CERT_FILE) {
 
         # Write pip.ini so the cert persists inside the venv
         $pipIni = Join-Path $VenvDir "pip.ini"
-        "[global]`ncert = $($env:SSL_CERT_FILE)" | Set-Content -Path $pipIni
+        $pipIniContent = "[global]" + [Environment]::NewLine + "cert = " + $env:SSL_CERT_FILE
+        Set-Content -Path $pipIni -Value $pipIniContent
 
         # Export so pip's requests library and other tools respect the CA
         $env:PIP_CERT = $env:SSL_CERT_FILE
         $env:REQUESTS_CA_BUNDLE = $env:SSL_CERT_FILE
         $env:CURL_CA_BUNDLE = $env:SSL_CERT_FILE
     } else {
-        Write-Host "WARNING: SSL_CERT_FILE is set to '$($env:SSL_CERT_FILE)' but file does not exist." -ForegroundColor Yellow
+        Write-Host "WARNING: SSL_CERT_FILE is set but file does not exist." -ForegroundColor Yellow
         Write-Host "         Continuing without custom certificate."
     }
 }
@@ -254,12 +260,15 @@ function Get-PipMirrorHosts {
 
     # 3. Check pip config files for index-url / extra-index-url
     if ($indexUrls.Count -eq 0) {
-        $pipConfigs = @(
-            "$env:APPDATA\pip\pip.ini",
-            "$env:USERPROFILE\pip\pip.ini",
-            "$env:APPDATA\pip\pip.conf",
-            "$env:USERPROFILE\.config\pip\pip.conf"
-        )
+        $pipConfigs = @()
+        if ($env:APPDATA) {
+            $pipConfigs += Join-Path $env:APPDATA "pip\pip.ini"
+            $pipConfigs += Join-Path $env:APPDATA "pip\pip.conf"
+        }
+        if ($env:USERPROFILE) {
+            $pipConfigs += Join-Path $env:USERPROFILE "pip\pip.ini"
+            $pipConfigs += Join-Path $env:USERPROFILE ".config\pip\pip.conf"
+        }
         foreach ($cfg in $pipConfigs) {
             if ($cfg -and (Test-Path $cfg -ErrorAction SilentlyContinue)) {
                 $content = Get-Content $cfg -ErrorAction SilentlyContinue
@@ -292,7 +301,7 @@ function Get-PipMirrorHosts {
 
 $MirrorHosts = Get-PipMirrorHosts
 if ($MirrorHosts) {
-    Write-Host "Detected pip mirror host(s) — adding --trusted-host:" -ForegroundColor Cyan
+    Write-Host "Detected pip mirror host(s) - adding --trusted-host:" -ForegroundColor Cyan
     foreach ($h in $MirrorHosts) {
         Write-Host "  $h"
         $PipExtraArgs += @("--trusted-host", $h)
@@ -326,7 +335,8 @@ pip install -e . @PipExtraArgs
 # ============================================================
 if ($FreecadLib) {
     # Write a .pth file so FreeCAD is importable automatically in the venv
-    $sitePackages = python -c 'import site; print(site.getsitepackages()[0])'
+    $siteCmd = 'import site; print(site.getsitepackages()[0])'
+    $sitePackages = python -c $siteCmd
     $pthFile = Join-Path $sitePackages "freecad_path.pth"
     Set-Content -Path $pthFile -Value $FreecadLib
     Write-Host ""
@@ -335,10 +345,10 @@ if ($FreecadLib) {
     # Verify FreeCAD actually imports
     Write-Host "Verifying FreeCAD import ..."
     try {
-        $pyCmd = 'import FreeCAD; v=FreeCAD.Version(); print("  FreeCAD " + v[0] + "." + v[1] + " OK")'
-        $fcVer = python -c $pyCmd 2>$null
+        $verifyCmd = 'import FreeCAD; v=FreeCAD.Version(); print("FreeCAD " + v[0] + "." + v[1] + " OK")'
+        $fcVer = python -c $verifyCmd 2>$null
         if ($LASTEXITCODE -eq 0 -and $fcVer) {
-            Write-Host $fcVer -ForegroundColor Green
+            Write-Host "  $fcVer" -ForegroundColor Green
             Write-Host "  FreeCAD is working." -ForegroundColor Green
         } else {
             Write-Host "  WARNING: FreeCAD import failed." -ForegroundColor Yellow
@@ -368,5 +378,5 @@ Write-Host "Run tests:"
 Write-Host "  pytest tests/"
 Write-Host ""
 Write-Host "CLI usage:"
-Write-Host '  python -m meshxcad.cli transfer --plain model.step --detail scan.stl --output result.stl'
+Write-Host "  python -m meshxcad.cli transfer --plain model.step --detail scan.stl --output result.stl"
 Write-Host ""
