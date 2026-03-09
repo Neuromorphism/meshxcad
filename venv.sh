@@ -2,6 +2,9 @@
 # venv.sh — Create a Python virtual environment for MeshXCAD
 # Works on Linux and macOS.
 #
+# This script detects FreeCAD's required Python version and creates the venv
+# with a matching interpreter so that all features work out of the box.
+#
 # Usage:
 #   chmod +x venv.sh
 #   ./venv.sh
@@ -10,174 +13,327 @@
 set -euo pipefail
 
 VENV_DIR=".venv"
-PYTHON=""
+OS="$(uname -s)"
 
-# ---------- locate python ----------
-for candidate in python3 python; do
-    if command -v "$candidate" &>/dev/null; then
-        PYTHON="$candidate"
+# ============================================================
+# 1. Find FreeCAD and determine its required Python version
+# ============================================================
+echo "--- Detecting FreeCAD ---"
+
+FREECAD_LIB=""
+FREECAD_PYVER=""
+
+# Collect candidate FreeCAD lib directories
+FC_LIB_CANDIDATES=()
+if [ "$OS" = "Darwin" ]; then
+    FC_LIB_CANDIDATES+=(
+        "/Applications/FreeCAD.app/Contents/Resources/lib"
+        "/Applications/FreeCAD.app/Contents/lib"
+        "$HOME/Applications/FreeCAD.app/Contents/Resources/lib"
+        "$HOME/Applications/FreeCAD.app/Contents/lib"
+    )
+    # Homebrew may also symlink into a versioned prefix
+    if command -v brew &>/dev/null; then
+        brew_prefix="$(brew --prefix 2>/dev/null || true)"
+        if [ -n "$brew_prefix" ]; then
+            FC_LIB_CANDIDATES+=("$brew_prefix/lib/freecad/lib")
+        fi
+    fi
+else
+    FC_LIB_CANDIDATES+=(
+        "/usr/lib/freecad-python3/lib"
+        "/usr/lib/freecad/lib"
+        "/usr/lib64/freecad/lib"
+        "/usr/share/freecad/lib"
+        "/snap/freecad/current/usr/lib/freecad-python3/lib"
+        "/snap/freecad/current/usr/lib/freecad/lib"
+    )
+fi
+
+for d in "${FC_LIB_CANDIDATES[@]}"; do
+    if [ -d "$d" ]; then
+        FREECAD_LIB="$d"
         break
     fi
 done
 
+# If we didn't find a lib dir, try to find it via the freecad binary
+if [ -z "$FREECAD_LIB" ] && command -v freecad &>/dev/null; then
+    fc_bin="$(command -v freecad)"
+    # Follow symlinks to find the real location
+    if command -v readlink &>/dev/null; then
+        fc_real="$(readlink -f "$fc_bin" 2>/dev/null || echo "$fc_bin")"
+        fc_dir="$(dirname "$fc_real")"
+        for suffix in "../lib" "../lib/freecad/lib" "../lib/freecad-python3/lib"; do
+            candidate="$fc_dir/$suffix"
+            if [ -d "$candidate" ]; then
+                FREECAD_LIB="$(cd "$candidate" && pwd)"
+                break
+            fi
+        done
+    fi
+fi
+
+# Probe FreeCAD's compiled Python version from its shared library
+detect_freecad_pyver() {
+    local libdir="$1"
+    local pyver=""
+
+    # Method 1: check for FreeCAD.so and use ldd/otool to find linked libpython
+    local fc_so=""
+    for f in "$libdir/FreeCAD.so" "$libdir/FreeCAD.dylib" "$libdir/_FreeCAD.so"; do
+        if [ -f "$f" ]; then
+            fc_so="$f"
+            break
+        fi
+    done
+
+    if [ -n "$fc_so" ]; then
+        if [ "$OS" = "Darwin" ]; then
+            pyver=$(otool -L "$fc_so" 2>/dev/null | grep -oE 'libpython3\.[0-9]+' | head -1 | sed 's/libpython//')
+        else
+            pyver=$(ldd "$fc_so" 2>/dev/null | grep -oE 'libpython3\.[0-9]+' | head -1 | sed 's/libpython//')
+        fi
+    fi
+
+    # Method 2: look for python3.X directories or .so files in the lib tree
+    if [ -z "$pyver" ]; then
+        pyver=$(find "$libdir" -maxdepth 2 -name "python3.*" -type d 2>/dev/null \
+            | grep -oE 'python3\.[0-9]+' | head -1 | sed 's/python//')
+    fi
+
+    # Method 3: check parent directories for python version hints
+    if [ -z "$pyver" ]; then
+        pyver=$(echo "$libdir" | grep -oE 'python3\.[0-9]+' | head -1 | sed 's/python//')
+    fi
+
+    echo "$pyver"
+}
+
+if [ -n "$FREECAD_LIB" ]; then
+    echo "FreeCAD library found: $FREECAD_LIB"
+    FREECAD_PYVER=$(detect_freecad_pyver "$FREECAD_LIB")
+fi
+
+# If we still don't have a version, try running freecad to ask it
+if [ -z "$FREECAD_PYVER" ] && command -v freecad &>/dev/null; then
+    FREECAD_PYVER=$(freecad --console -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null || true)
+fi
+
+if [ -n "$FREECAD_PYVER" ]; then
+    echo "FreeCAD requires Python $FREECAD_PYVER"
+else
+    if [ -n "$FREECAD_LIB" ]; then
+        echo "WARNING: Found FreeCAD but could not determine its Python version."
+        echo "         Defaulting to system Python. FreeCAD import may fail."
+    else
+        echo "FreeCAD not found. Will install with system Python."
+        echo "FreeCAD features (.FCStd I/O, parametric CAD) will be unavailable."
+    fi
+fi
+
+# ============================================================
+# 2. Find or install the required Python version
+# ============================================================
+PYTHON=""
+REQUIRED="$FREECAD_PYVER"
+
+find_python_version() {
+    # Try exact version binaries first
+    local ver="$1"
+    for candidate in "python${ver}" "python$(echo "$ver" | tr -d '.')"; do
+        if command -v "$candidate" &>/dev/null; then
+            local actual
+            actual=$("$candidate" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null || true)
+            if [ "$actual" = "$ver" ]; then
+                echo "$candidate"
+                return
+            fi
+        fi
+    done
+    # Try pyenv shims
+    if command -v pyenv &>/dev/null; then
+        local installed
+        installed=$(pyenv versions --bare 2>/dev/null | grep "^${ver}" | tail -1)
+        if [ -n "$installed" ]; then
+            local pyenv_root
+            pyenv_root="$(pyenv root)"
+            local bin="$pyenv_root/versions/$installed/bin/python3"
+            if [ -x "$bin" ]; then
+                echo "$bin"
+                return
+            fi
+        fi
+    fi
+}
+
+if [ -n "$REQUIRED" ]; then
+    echo ""
+    echo "--- Locating Python $REQUIRED ---"
+    PYTHON=$(find_python_version "$REQUIRED")
+
+    if [ -z "$PYTHON" ]; then
+        echo "Python $REQUIRED not found. Attempting to install it..."
+        echo ""
+
+        if [ "$OS" = "Darwin" ]; then
+            # macOS: try Homebrew first, then pyenv
+            if command -v brew &>/dev/null; then
+                BREW_PKG="python@${REQUIRED}"
+                echo "Running: brew install $BREW_PKG"
+                if brew install "$BREW_PKG" 2>&1; then
+                    brew_prefix="$(brew --prefix "$BREW_PKG" 2>/dev/null || true)"
+                    if [ -x "$brew_prefix/bin/python${REQUIRED}" ]; then
+                        PYTHON="$brew_prefix/bin/python${REQUIRED}"
+                    fi
+                fi
+            fi
+            if [ -z "$PYTHON" ] && command -v pyenv &>/dev/null; then
+                echo "Trying pyenv..."
+                latest=$(pyenv install --list 2>/dev/null | tr -d ' ' | grep "^${REQUIRED}\." | grep -v '[a-zA-Z]' | tail -1)
+                if [ -n "$latest" ]; then
+                    echo "Running: pyenv install $latest"
+                    pyenv install -s "$latest"
+                    PYTHON=$(find_python_version "$REQUIRED")
+                fi
+            fi
+        else
+            # Linux: try deadsnakes PPA (Debian/Ubuntu), then dnf, then pyenv
+            if command -v apt-get &>/dev/null; then
+                echo "Adding deadsnakes PPA and installing Python $REQUIRED..."
+                if command -v add-apt-repository &>/dev/null; then
+                    sudo add-apt-repository -y ppa:deadsnakes/ppa 2>/dev/null || true
+                fi
+                sudo apt-get update -qq 2>/dev/null || true
+                sudo apt-get install -y "python${REQUIRED}" "python${REQUIRED}-venv" "python${REQUIRED}-dev" 2>&1 || true
+                PYTHON=$(find_python_version "$REQUIRED")
+            elif command -v dnf &>/dev/null; then
+                echo "Running: dnf install python${REQUIRED}"
+                sudo dnf install -y "python${REQUIRED}" 2>&1 || true
+                PYTHON=$(find_python_version "$REQUIRED")
+            fi
+            if [ -z "$PYTHON" ] && command -v pyenv &>/dev/null; then
+                echo "Trying pyenv..."
+                latest=$(pyenv install --list 2>/dev/null | tr -d ' ' | grep "^${REQUIRED}\." | grep -v '[a-zA-Z]' | tail -1)
+                if [ -n "$latest" ]; then
+                    echo "Running: pyenv install $latest"
+                    pyenv install -s "$latest"
+                    PYTHON=$(find_python_version "$REQUIRED")
+                fi
+            fi
+        fi
+
+        if [ -z "$PYTHON" ]; then
+            echo ""
+            echo "ERROR: Could not install Python $REQUIRED automatically."
+            echo ""
+            echo "Please install Python $REQUIRED manually:"
+            if [ "$OS" = "Darwin" ]; then
+                echo "  brew install python@${REQUIRED}"
+                echo "  # or"
+                echo "  pyenv install ${REQUIRED}"
+            else
+                echo "  # Debian/Ubuntu:"
+                echo "  sudo apt install python${REQUIRED} python${REQUIRED}-venv"
+                echo "  # Fedora:"
+                echo "  sudo dnf install python${REQUIRED}"
+                echo "  # Or use pyenv:"
+                echo "  pyenv install ${REQUIRED}"
+            fi
+            echo ""
+            echo "Then re-run this script."
+            exit 1
+        fi
+    fi
+
+    echo "Found: $PYTHON"
+else
+    # No FreeCAD version requirement — use system python
+    for candidate in python3 python; do
+        if command -v "$candidate" &>/dev/null; then
+            PYTHON="$candidate"
+            break
+        fi
+    done
+fi
+
 if [ -z "$PYTHON" ]; then
-    echo "Error: Python 3 not found. Please install Python 3.8+ first."
+    echo "Error: No suitable Python 3 interpreter found."
     exit 1
 fi
 
 PY_VERSION=$("$PYTHON" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
-PY_MAJOR=$("$PYTHON" -c 'import sys; print(sys.version_info.major)')
-PY_MINOR=$("$PYTHON" -c 'import sys; print(sys.version_info.minor)')
+echo "Using $PYTHON (Python $PY_VERSION)"
 
-if [ "$PY_MAJOR" -lt 3 ] || { [ "$PY_MAJOR" -eq 3 ] && [ "$PY_MINOR" -lt 8 ]; }; then
-    echo "Error: Python 3.8+ required (found $PY_VERSION)."
+# Verify version match if we have a requirement
+if [ -n "$REQUIRED" ] && [ "$PY_VERSION" != "$REQUIRED" ]; then
+    echo "ERROR: Interpreter reports $PY_VERSION but FreeCAD needs $REQUIRED."
     exit 1
 fi
 
-echo "Using $PYTHON ($PY_VERSION)"
-
-# ---------- create venv ----------
+# ============================================================
+# 3. Create the virtual environment
+# ============================================================
+echo ""
 if [ -d "$VENV_DIR" ]; then
-    echo "Virtual environment already exists at $VENV_DIR — removing and recreating."
+    echo "Removing existing $VENV_DIR ..."
     rm -rf "$VENV_DIR"
 fi
 
-echo "Creating virtual environment in $VENV_DIR ..."
+echo "Creating virtual environment in $VENV_DIR (Python $PY_VERSION) ..."
 "$PYTHON" -m venv "$VENV_DIR"
 
-# ---------- activate ----------
 source "$VENV_DIR/bin/activate"
 
-# ---------- upgrade pip ----------
+# ============================================================
+# 4. Install dependencies
+# ============================================================
+echo ""
 echo "Upgrading pip ..."
 pip install --upgrade pip
 
-# ---------- core dependencies ----------
 echo "Installing core dependencies ..."
 pip install numpy scipy
 
-# ---------- visualization ----------
 echo "Installing visualization dependencies ..."
 pip install matplotlib
 
-# ---------- CAD kernel (OCP / cadquery) ----------
 echo "Installing OpenCASCADE Python bindings ..."
-# cadquery bundles OCP and is the easiest cross-platform way to get it
 pip install cadquery
 
-# ---------- FreeCAD ----------
-# FreeCAD cannot be installed via pip. Its Python modules are compiled against a
-# specific Python version (often 3.11), so "import FreeCAD" only works when the
-# interpreter version matches. We detect FreeCAD by looking for the binary and
-# its lib directory instead.
-echo ""
-echo "--- FreeCAD (optional) ---"
-OS="$(uname -s)"
-FREECAD_FOUND=false
-FREECAD_LIB=""
-
-# Check common install locations
-if [ "$OS" = "Darwin" ]; then
-    # macOS: Homebrew cask or standalone .app
-    for d in \
-        "/Applications/FreeCAD.app/Contents/Resources/lib" \
-        "/Applications/FreeCAD.app/Contents/lib" \
-        "$HOME/Applications/FreeCAD.app/Contents/Resources/lib" \
-        "$HOME/Applications/FreeCAD.app/Contents/lib"; do
-        if [ -d "$d" ]; then
-            FREECAD_FOUND=true
-            FREECAD_LIB="$d"
-            break
-        fi
-    done
-    # Also check if the binary is on PATH
-    if ! $FREECAD_FOUND && command -v freecad &>/dev/null; then
-        FREECAD_FOUND=true
-    fi
-else
-    # Linux: system package or Snap/Flatpak
-    for d in \
-        "/usr/lib/freecad-python3/lib" \
-        "/usr/lib/freecad/lib" \
-        "/usr/lib64/freecad/lib" \
-        "/usr/share/freecad/lib" \
-        "/snap/freecad/current/usr/lib/freecad-python3/lib" \
-        "/snap/freecad/current/usr/lib/freecad/lib"; do
-        if [ -d "$d" ]; then
-            FREECAD_FOUND=true
-            FREECAD_LIB="$d"
-            break
-        fi
-    done
-    if ! $FREECAD_FOUND && command -v freecad &>/dev/null; then
-        FREECAD_FOUND=true
-    fi
-fi
-
-# Also try the import as a last resort — it works when the venv Python version
-# happens to match FreeCAD's compiled version.
-if ! $FREECAD_FOUND; then
-    if python -c "import FreeCAD" 2>/dev/null; then
-        FREECAD_FOUND=true
-    fi
-fi
-
-if $FREECAD_FOUND; then
-    echo "FreeCAD detected."
-    if [ -n "$FREECAD_LIB" ]; then
-        echo "  Library path: $FREECAD_LIB"
-        echo ""
-        echo "  To make FreeCAD importable from this venv, add to your shell profile"
-        echo "  or run before activating:"
-        echo "    export PYTHONPATH=\"$FREECAD_LIB:\$PYTHONPATH\""
-        echo ""
-        echo "  NOTE: FreeCAD's Python modules are compiled against a specific Python"
-        echo "  version (check with: ls $FREECAD_LIB/FreeCAD.so or .pyd)."
-        echo "  If your venv Python ($PY_VERSION) does not match, you will get import"
-        echo "  errors. In that case, install a matching Python version or use conda:"
-        echo "    conda install -c conda-forge freecad python=$PY_VERSION"
-    fi
-else
-    echo "FreeCAD is NOT installed."
-    echo "Some features (parametric CAD generation, .FCStd I/O) require FreeCAD."
-    echo ""
-    if [ "$OS" = "Linux" ]; then
-        echo "Install FreeCAD on Linux:"
-        echo "  sudo apt install freecad          # Debian / Ubuntu"
-        echo "  sudo dnf install freecad           # Fedora"
-        echo "  conda install -c conda-forge freecad   # via conda"
-        echo ""
-        echo "Then add its lib path to PYTHONPATH (adjust for your install):"
-        echo '  export PYTHONPATH="/usr/lib/freecad-python3/lib:$PYTHONPATH"'
-    elif [ "$OS" = "Darwin" ]; then
-        echo "Install FreeCAD on macOS:"
-        echo "  brew install --cask freecad        # via Homebrew"
-        echo "  conda install -c conda-forge freecad   # via conda"
-        echo ""
-        echo "Then add its lib path to PYTHONPATH (adjust for your install):"
-        echo '  export PYTHONPATH="/Applications/FreeCAD.app/Contents/Resources/lib:$PYTHONPATH"'
-    fi
-    echo ""
-    echo "NOTE: FreeCAD's Python modules are compiled against a specific Python"
-    echo "version. Your venv uses Python $PY_VERSION. If FreeCAD was built against"
-    echo "a different version, 'import FreeCAD' will fail even with the correct"
-    echo "PYTHONPATH. Use conda to get a matching set:"
-    echo "  conda install -c conda-forge freecad python=$PY_VERSION"
-fi
-
-# ---------- testing ----------
-echo ""
 echo "Installing test dependencies ..."
 pip install pytest
 
-# ---------- install meshxcad in editable mode ----------
 echo "Installing meshxcad in editable mode ..."
 pip install -e .
 
-# ---------- summary ----------
+# ============================================================
+# 5. Configure FreeCAD PYTHONPATH
+# ============================================================
+if [ -n "$FREECAD_LIB" ]; then
+    # Write an activation hook so FreeCAD is importable automatically
+    SITECUSTOMIZE="$VENV_DIR/lib/python${PY_VERSION}/site-packages/freecad_path.pth"
+    echo "$FREECAD_LIB" > "$SITECUSTOMIZE"
+    echo ""
+    echo "Added $FREECAD_LIB to venv site-packages (.pth file)"
+
+    # Verify FreeCAD actually imports
+    echo "Verifying FreeCAD import ..."
+    if python -c "import FreeCAD; print(f'  FreeCAD {FreeCAD.Version()[0]}.{FreeCAD.Version()[1]} OK')" 2>/dev/null; then
+        echo "  FreeCAD is working."
+    else
+        echo "  WARNING: FreeCAD import failed. The library may have additional"
+        echo "  dependencies. Check: python -c 'import FreeCAD'"
+    fi
+fi
+
+# ============================================================
+# 6. Summary
+# ============================================================
 echo ""
 echo "============================================"
 echo " MeshXCAD virtual environment ready!"
+echo " Python $PY_VERSION | $([ -n "$FREECAD_LIB" ] && echo "FreeCAD: yes" || echo "FreeCAD: no")"
 echo "============================================"
 echo ""
 echo "Activate it with:"
