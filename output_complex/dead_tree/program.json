@@ -1,0 +1,39 @@
+{
+  "program": {
+    "operations": [
+      {
+        "op_type": "cone",
+        "enabled": true,
+        "params": {
+          "center": [
+            5.850761814696768,
+            7.374825954850454,
+            -15.658450549810285
+          ],
+          "base_radius": 2.1804835254302777,
+          "top_radius": 1.2935548409713986,
+          "height": 12.17486084516532
+        }
+      }
+    ],
+    "n_ops": 1,
+    "complexity": 1.5
+  },
+  "initial": {
+    "elegance": 0.734,
+    "accuracy": 0.0,
+    "cad_score": 0.5033,
+    "n_ops": 1,
+    "program": "1 ops: cone"
+  },
+  "final": {
+    "elegance": 0.734,
+    "accuracy": 0.0,
+    "cad_score": 0.5033,
+    "n_ops": 1,
+    "program_summary": "1 ops: cone"
+  },
+  "converged": true,
+  "total_sweeps": 3,
+  "elapsed_sec": 2.7
+}

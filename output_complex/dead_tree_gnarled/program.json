@@ -1,0 +1,61 @@
+{
+  "program": {
+    "operations": [
+      {
+        "op_type": "cylinder",
+        "enabled": true,
+        "params": {
+          "center": [
+            0.08950193443076497,
+            0.13676855599702953,
+            4.4880377568668735
+          ],
+          "axis": [
+            -0.1929873554628344,
+            -0.3417917874324724,
+            1.4063164274916777
+          ],
+          "radius": 0.967563897050976,
+          "height": 8.338237897203731
+        }
+      },
+      {
+        "op_type": "cylinder",
+        "enabled": true,
+        "params": {
+          "center": [
+            -0.29293731880126783,
+            0.6868001358870083,
+            6.830227499828045
+          ],
+          "axis": [
+            -0.8176723182177025,
+            -0.33816912694069734,
+            -0.010987445650500373
+          ],
+          "radius": 1.256273679631027,
+          "height": 2.685499193908411
+        }
+      }
+    ],
+    "n_ops": 2,
+    "complexity": 2.0
+  },
+  "initial": {
+    "elegance": 0.8894,
+    "accuracy": 0.6968,
+    "cad_score": 0.5229,
+    "n_ops": 1,
+    "program": "1 ops: cylinder"
+  },
+  "final": {
+    "elegance": 0.8769,
+    "accuracy": 0.8,
+    "cad_score": 0.4287,
+    "n_ops": 2,
+    "program_summary": "2 ops: cylinder \u2192 cylinder"
+  },
+  "converged": true,
+  "total_sweeps": 4,
+  "elapsed_sec": 9.2
+}

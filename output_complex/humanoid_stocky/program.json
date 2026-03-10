@@ -1,0 +1,77 @@
+{
+  "program": {
+    "operations": [
+      {
+        "op_type": "box",
+        "enabled": true,
+        "params": {
+          "center": [
+            0.05159700000000002,
+            0.056521296506938754,
+            0.899234169287706
+          ],
+          "dimensions": [
+            1.0741170618092752,
+            0.2352326319430471,
+            0.3800990997682176
+          ]
+        }
+      },
+      {
+        "op_type": "sphere",
+        "enabled": true,
+        "params": {
+          "center": [
+            -3.0066404585626436e-18,
+            1.3092252648881564e-18,
+            1.299028960845995
+          ],
+          "radius": 0.12061568476352809
+        }
+      },
+      {
+        "op_type": "sphere",
+        "enabled": true,
+        "params": {
+          "center": [
+            -0.04359074397116322,
+            0.017814109090909094,
+            0.22578422533333342
+          ],
+          "radius": 0.1536248934081099
+        }
+      },
+      {
+        "op_type": "sphere",
+        "enabled": true,
+        "params": {
+          "center": [
+            0.07611082280679292,
+            0.03494400000000001,
+            0.10930920000000005
+          ],
+          "radius": 0.09498398626524147
+        }
+      }
+    ],
+    "n_ops": 4,
+    "complexity": 4.0
+  },
+  "initial": {
+    "elegance": 0.6889,
+    "accuracy": 0.0,
+    "cad_score": 0.493,
+    "n_ops": 1,
+    "program": "1 ops: box"
+  },
+  "final": {
+    "elegance": 0.773,
+    "accuracy": 0.8566,
+    "cad_score": 0.3841,
+    "n_ops": 4,
+    "program_summary": "4 ops: box \u2192 sphere \u2192 sphere \u2192 sphere"
+  },
+  "converged": true,
+  "total_sweeps": 4,
+  "elapsed_sec": 10.7
+}

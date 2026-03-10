@@ -1,0 +1,56 @@
+{
+  "program": {
+    "operations": [
+      {
+        "op_type": "cylinder",
+        "enabled": true,
+        "params": {
+          "center": [
+            0.2943939312609622,
+            0.06881949456493677,
+            2.5896749623486714
+          ],
+          "axis": [
+            -0.1725532295279161,
+            -0.13992636034963474,
+            1.3488814224082153
+          ],
+          "radius": 0.7646338482471037,
+          "height": 4.889442427485764
+        }
+      },
+      {
+        "op_type": "torus",
+        "enabled": true,
+        "params": {
+          "center": [
+            -0.1076389961748973,
+            0.2649474601641295,
+            4.123596511618853
+          ],
+          "major_r": 0.6809579994612823,
+          "minor_r": 0.3591845923772601
+        }
+      }
+    ],
+    "n_ops": 2,
+    "complexity": 2.5
+  },
+  "initial": {
+    "elegance": 0.8797,
+    "accuracy": 0.7285,
+    "cad_score": 0.5235,
+    "n_ops": 1,
+    "program": "1 ops: cylinder"
+  },
+  "final": {
+    "elegance": 0.8402,
+    "accuracy": 0.8014,
+    "cad_score": 0.4195,
+    "n_ops": 2,
+    "program_summary": "2 ops: cylinder \u2192 torus"
+  },
+  "converged": true,
+  "total_sweeps": 4,
+  "elapsed_sec": 9.0
+}

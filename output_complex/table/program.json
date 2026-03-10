@@ -1,0 +1,37 @@
+{
+  "program": {
+    "operations": [
+      {
+        "op_type": "sphere",
+        "enabled": true,
+        "params": {
+          "center": [
+            7.642839662274628e-18,
+            -7.642839662274628e-18,
+            0.39615397702600974
+          ],
+          "radius": 0.5440923470595507
+        }
+      }
+    ],
+    "n_ops": 1,
+    "complexity": 1.0
+  },
+  "initial": {
+    "elegance": 0.8263,
+    "accuracy": 0.5042,
+    "cad_score": 0.523,
+    "n_ops": 1,
+    "program": "1 ops: sphere"
+  },
+  "final": {
+    "elegance": 0.8263,
+    "accuracy": 0.5042,
+    "cad_score": 0.523,
+    "n_ops": 1,
+    "program_summary": "1 ops: sphere"
+  },
+  "converged": true,
+  "total_sweeps": 3,
+  "elapsed_sec": 2.1
+}

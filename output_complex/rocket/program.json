@@ -1,0 +1,43 @@
+{
+  "program": {
+    "operations": [
+      {
+        "op_type": "cylinder",
+        "enabled": true,
+        "params": {
+          "center": [
+            -4.4768495732739095e-18,
+            -1.9868867984488438e-17,
+            0.48939339828220174
+          ],
+          "axis": [
+            0.0,
+            -2.220446049250313e-16,
+            1.0
+          ],
+          "radius": 0.1,
+          "height": 0.9701525432638164
+        }
+      }
+    ],
+    "n_ops": 1,
+    "complexity": 1.0
+  },
+  "initial": {
+    "elegance": 0.8983,
+    "accuracy": 0.8217,
+    "cad_score": 0.5251,
+    "n_ops": 1,
+    "program": "1 ops: cylinder"
+  },
+  "final": {
+    "elegance": 0.9019,
+    "accuracy": 0.8395,
+    "cad_score": 0.5299,
+    "n_ops": 1,
+    "program_summary": "1 ops: cylinder"
+  },
+  "converged": true,
+  "total_sweeps": 4,
+  "elapsed_sec": 1.2
+}
