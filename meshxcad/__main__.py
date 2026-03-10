@@ -739,6 +739,135 @@ def _run_refine(args):
     print(f"Saved to: {out_path}")
 
 
+def _run_complexity(args):
+    """Estimate mesh complexity and recommend op budget."""
+    from .cad_program import mesh_complexity
+    target_v, target_f = load_mesh(args.mesh)
+    mc = mesh_complexity(target_v, target_f)
+
+    if getattr(args, 'json', False):
+        result = {k: round(v, 4) if isinstance(v, float) else v
+                  for k, v in mc.items()}
+        print(json.dumps(result, indent=2))
+    else:
+        print(f"Complexity:  {mc['complexity']:.3f}")
+        print(f"Components:  {mc['n_components']}")
+        print(f"Curvature H: {mc['curvature_entropy']:.3f}")
+        print(f"Op budget:   {mc['op_budget']}")
+
+
+def _run_auto(args):
+    """Run the full automated pipeline."""
+    from .auto_pipeline import auto_pipeline
+    from .cad_program import CadProgram
+
+    if not os.path.isfile(args.mesh):
+        print(f"Error: mesh file not found: {args.mesh}", file=sys.stderr)
+        sys.exit(1)
+
+    # Load target mesh
+    if not args.quiet:
+        print(f"Loading {args.mesh}...")
+    target_v, target_f = load_mesh(args.mesh)
+    if not args.quiet:
+        print(f"  {len(target_v)} vertices, {len(target_f)} faces")
+
+    # Load existing CAD if provided
+    initial_cad = None
+    if args.cad:
+        if not os.path.isfile(args.cad):
+            print(f"Error: CAD file not found: {args.cad}", file=sys.stderr)
+            sys.exit(1)
+
+        if not args.quiet:
+            print(f"Loading starting CAD from {args.cad}...")
+
+        if _is_step_file(args.cad):
+            initial_cad = _load_cad_from_step(args.cad, target_v, target_f,
+                                               quiet=args.quiet)
+        else:
+            with open(args.cad) as f:
+                cad_data = json.load(f)
+            if "operations" in cad_data:
+                initial_cad = cad_data
+            elif "program" in cad_data and "operations" in cad_data["program"]:
+                initial_cad = cad_data["program"]
+            else:
+                print("Error: JSON must contain 'operations' key",
+                      file=sys.stderr)
+                sys.exit(1)
+
+            if not args.quiet:
+                prog = CadProgram.from_dict(initial_cad)
+                print(f"  Starting from: {prog.summary()}")
+
+    # Determine thoroughness
+    if args.fast:
+        thoroughness = "quick"
+    elif args.thorough:
+        thoroughness = "thorough"
+    else:
+        thoroughness = "normal"
+
+    if not args.quiet:
+        mode = "adding detail" if initial_cad else "from scratch"
+        print(f"\nAuto pipeline ({mode}, {thoroughness})")
+        print("=" * 50)
+
+    result = auto_pipeline(
+        target_v, target_f,
+        initial_cad=initial_cad,
+        thoroughness=thoroughness,
+        verbose=not args.quiet,
+    )
+
+    # Output directory
+    if args.output:
+        out_dir = args.output
+    else:
+        base = os.path.splitext(os.path.basename(args.mesh))[0]
+        out_dir = os.path.join(os.path.dirname(args.mesh) or ".", f"{base}_cad")
+    os.makedirs(out_dir, exist_ok=True)
+
+    # Write program JSON
+    program_path = os.path.join(out_dir, "program.json")
+    program_out = {
+        "program": result["program"],
+        "accuracy": result["accuracy"],
+        "elegance": result["elegance"],
+        "phases": result["phases"],
+        "elapsed_sec": result["elapsed_sec"],
+        "mode": result["mode"],
+        "techniques": result["techniques"],
+    }
+    with open(program_path, "w") as f:
+        json.dump(program_out, f, indent=2)
+
+    # Write output mesh
+    prog_obj = result["_program_obj"]
+    cad_v, cad_f = prog_obj.evaluate()
+    mesh_path = None
+    if len(cad_v) > 0 and not args.json_only:
+        mesh_path = os.path.join(out_dir, "output.stl")
+        from .stl_io import write_binary_stl
+        write_binary_stl(mesh_path, cad_v, cad_f)
+
+    if not args.quiet:
+        print(f"\nOutput:")
+        print(f"  {program_path}")
+        if mesh_path:
+            print(f"  {mesh_path}")
+    else:
+        summary = {
+            "program_json": program_path,
+            "mesh_stl": mesh_path,
+            "accuracy": result["accuracy"],
+            "elegance": result["elegance"].get("total", 0),
+            "n_ops": result["_program_obj"].n_enabled(),
+        }
+        print(json.dumps(summary))
+
+
 def _run_detect_fillets(args):
     """Detect intersection fillets and optionally add them to the program."""
     from .cad_program import CadProgram
@@ -802,27 +931,30 @@ def main():
         description="Optimise a CAD program to match a target mesh.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
-examples:
-  python -m meshxcad part.stl                     # auto-fit
-  python -m meshxcad part.step                    # STEP as target
-  python -m meshxcad part.stl -c program.json     # refine existing
-  python -m meshxcad part.stl -c draft.step       # STEP as starting CAD
-  python -m meshxcad part.stl -o results/         # output dir
-  python -m meshxcad part.stl --fast              # quick single sweep
-  python -m meshxcad part.stl --sweeps 30 -r 10   # thorough
+auto pipeline (recommended):
+  python -m meshxcad auto part.stl                # full auto, all capabilities
+  python -m meshxcad auto part.stl -c draft.json  # add detail to existing CAD
+  python -m meshxcad auto part.stl --thorough     # thorough mode
+  python -m meshxcad auto part.stl --fast         # quick mode
 
-individual tools (for agent use):
+legacy single-pass:
+  python -m meshxcad part.stl                     # coevolution only
+  python -m meshxcad part.stl -c program.json     # refine existing
+  python -m meshxcad part.stl --fast              # quick single sweep
+
+individual tools:
   python -m meshxcad classify part.stl            # classify shape type
+  python -m meshxcad complexity part.stl          # mesh complexity + op budget
+  python -m meshxcad segment part.stl             # segment into regions
   python -m meshxcad fit part.stl                 # fit primitives
   python -m meshxcad profile part.stl             # fit profiled cylinder
   python -m meshxcad reconstruct part.stl         # reconstruct CAD mesh
   python -m meshxcad score part.stl program.json  # score a program
   python -m meshxcad refine part.stl program.json # refine a program
-  python -m meshxcad detect-fillets part.stl prog.json --add  # detect & add fillets
+  python -m meshxcad detect-fillets part.stl prog.json --add
 
 drawing mode:
   python -m meshxcad drawing input.png            # interpret drawing → CAD
-  python -m meshxcad drawing input.png --fast     # quick mode
 """,
     )
 
@@ -910,6 +1042,24 @@ drawing mode:
     fillet_p.add_argument("-o", "--output", default=None,
                            help="Output JSON path (default: overwrite if --add)")
 
+    # auto: full automated pipeline
+    auto_p = subparsers.add_parser("auto",
+                                    help="Full automated pipeline using all capabilities")
+    auto_p.add_argument("mesh", help="Target mesh file (STL/OBJ/PLY/STEP/IGES)")
+    auto_p.add_argument("-c", "--cad", default=None,
+                         help="Starting CAD: JSON program or STEP/IGES file. "
+                              "If provided, adds detail to this program.")
+    auto_p.add_argument("-o", "--output", default=None,
+                         help="Output directory (default: <mesh>_cad/)")
+    auto_p.add_argument("--fast", action="store_true",
+                         help="Quick mode: fewer sweeps, no gap-filling")
+    auto_p.add_argument("--thorough", action="store_true",
+                         help="Thorough mode: more sweeps, multiple gap-fill passes")
+    auto_p.add_argument("-q", "--quiet", action="store_true",
+                         help="Suppress progress output")
+    auto_p.add_argument("--json-only", action="store_true",
+                         help="Only output JSON (no mesh STL)")
+
     # Drawing subcommand
     draw_parser = subparsers.add_parser("drawing",
                                          help="Interpret a mechanical drawing → CAD")
@@ -934,58 +1084,54 @@ drawing mode:
     draw_parser.add_argument("-q", "--quiet", action="store_true",
                               help="Suppress progress output")
 
-    # Original mesh arguments (backward compatible)
-    parser.add_argument("mesh", nargs="?", default=None,
-                        help="Target mesh file (STL/OBJ/PLY/STEP/IGES)")
-    parser.add_argument("-c", "--cad", default=None,
-                        help="Starting CAD: JSON program or STEP/IGES file")
-    parser.add_argument("-o", "--output", default=None,
-                        help="Output directory (default: <mesh>_cad/)")
-    parser.add_argument("--sweeps", type=int, default=15,
-                        help="Max optimisation sweeps (default: 15)")
-    parser.add_argument("-r", "--rounds", type=int, default=5,
-                        help="Inner rounds per sweep (default: 5)")
-    parser.add_argument("--patience", type=int, default=3,
-                        help="Stop after N no-improvement sweeps (default: 3)")
-    parser.add_argument("--fast", action="store_true",
-                        help="Quick mode: 1 sweep, 3 rounds")
-    parser.add_argument("-q", "--quiet", action="store_true",
-                        help="Suppress progress output")
-    parser.add_argument("--json-only", action="store_true",
-                        help="Only output JSON (no mesh STL)")
+    # Check if the first arg is a known subcommand — if so, don't add
+    # the top-level positional 'mesh' arg (it conflicts with subparsers).
+    _known_subcommands = {
+        "auto", "drawing", "classify", "complexity", "segment", "fit",
+        "profile", "reconstruct", "score", "refine", "detect-fillets",
+    }
+    _is_subcommand = (len(sys.argv) > 1 and sys.argv[1] in _known_subcommands)
+
+    if not _is_subcommand:
+        # Original mesh arguments (backward compatible, legacy single-pass)
+        parser.add_argument("mesh", nargs="?", default=None,
+                            help="Target mesh file (STL/OBJ/PLY/STEP/IGES)")
+        parser.add_argument("-c", "--cad", default=None,
+                            help="Starting CAD: JSON program or STEP/IGES file")
+        parser.add_argument("-o", "--output", default=None,
+                            help="Output directory (default: <mesh>_cad/)")
+        parser.add_argument("--sweeps", type=int, default=15,
+                            help="Max optimisation sweeps (default: 15)")
+        parser.add_argument("-r", "--rounds", type=int, default=5,
+                            help="Inner rounds per sweep (default: 5)")
+        parser.add_argument("--patience", type=int, default=3,
+                            help="Stop after N no-improvement sweeps (default: 3)")
+        parser.add_argument("--fast", action="store_true",
+                            help="Quick mode: 1 sweep, 3 rounds")
+        parser.add_argument("-q", "--quiet", action="store_true",
+                            help="Suppress progress output")
+        parser.add_argument("--json-only", action="store_true",
+                            help="Only output JSON (no mesh STL)")
 
     args = parser.parse_args()
 
     # Dispatch to subcommands
-    if args.command == "drawing":
-        _run_drawing_mode(args)
-        return
-    if args.command == "classify":
-        _run_classify(args)
-        return
-    if args.command == "complexity":
-        _run_complexity(args)
-        return
-    if args.command == "segment":
-        _run_segment(args)
-        return
-    if args.command == "fit":
-        _run_fit(args)
-        return
-    if args.command == "profile":
-        _run_profile(args)
-        return
-    if args.command == "reconstruct":
-        _run_reconstruct(args)
-        return
-    if args.command == "score":
-        _run_score(args)
-        return
-    if args.command == "refine":
-        _run_refine(args)
-        return
-    if args.command == "detect-fillets":
-        _run_detect_fillets(args)
+    _subcommand_dispatch = {
+        "auto":           _run_auto,
+        "drawing":        _run_drawing_mode,
+        "classify":       _run_classify,
+        "complexity":     _run_complexity,
+        "segment":        _run_segment,
+        "fit":            _run_fit,
+        "profile":        _run_profile,
+        "reconstruct":    _run_reconstruct,
+        "score":          _run_score,
+        "refine":         _run_refine,
+        "detect-fillets": _run_detect_fillets,
+    }
+
+    if args.command in _subcommand_dispatch:
+        _subcommand_dispatch[args.command](args)
         return
 
     # --- Validate inputs ---
