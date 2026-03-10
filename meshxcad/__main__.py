@@ -821,16 +821,25 @@ def _run_auto(args):
         verbose=not args.quiet,
     )
 
-    # Output directory
+    # Output: if -o looks like a file (has extension), write there directly;
+    # otherwise treat it as a directory.
+    out_dir = None
+    out_file = None
     if args.output:
-        out_dir = args.output
+        ext = os.path.splitext(args.output)[1].lower()
+        if ext in (_MESH_EXTS | _STEP_EXTS | {".json"}):
+            out_file = args.output
+            out_dir = os.path.dirname(args.output) or "."
+        else:
+            out_dir = args.output
     else:
         base = os.path.splitext(os.path.basename(args.mesh))[0]
         out_dir = os.path.join(os.path.dirname(args.mesh) or ".", f"{base}_cad")
     os.makedirs(out_dir, exist_ok=True)
 
     # Write program JSON
-    program_path = os.path.join(out_dir, "program.json")
+    program_path = out_file if (out_file and out_file.endswith(".json")) \
+        else os.path.join(out_dir, "program.json")
     program_out = {
         "program": result["program"],
         "accuracy": result["accuracy"],
@@ -848,7 +857,10 @@ def _run_auto(args):
     cad_v, cad_f = prog_obj.evaluate()
     mesh_path = None
     if len(cad_v) > 0 and not args.json_only:
-        mesh_path = os.path.join(out_dir, "output.stl")
+        if out_file and os.path.splitext(out_file)[1].lower() in (_MESH_EXTS | _STEP_EXTS):
+            mesh_path = out_file
+        else:
+            mesh_path = os.path.join(out_dir, "output.stl")
         from .stl_io import write_binary_stl
         write_binary_stl(mesh_path, cad_v, cad_f)
 
@@ -1176,9 +1188,16 @@ gpu:
         print(f"Error: CAD file not found: {args.cad}", file=sys.stderr)
         sys.exit(1)
 
-    # --- Output directory ---
+    # --- Output: file or directory ---
+    out_dir = None
+    out_file = None
     if args.output:
-        out_dir = args.output
+        ext = os.path.splitext(args.output)[1].lower()
+        if ext in (_MESH_EXTS | _STEP_EXTS | {".json"}):
+            out_file = args.output
+            out_dir = os.path.dirname(args.output) or "."
+        else:
+            out_dir = args.output
     else:
         base = os.path.splitext(os.path.basename(args.mesh))[0]
         out_dir = os.path.join(os.path.dirname(args.mesh) or ".", f"{base}_cad")
@@ -1241,7 +1260,8 @@ gpu:
 
     # --- Write outputs ---
     # 1. CadProgram JSON
-    program_path = os.path.join(out_dir, "program.json")
+    program_path = out_file if (out_file and out_file.endswith(".json")) \
+        else os.path.join(out_dir, "program.json")
     program_out = {
         "program": result["program"],
         "initial": result["initial"],
@@ -1260,7 +1280,10 @@ gpu:
         prog_obj = result["_program_obj"]
         cad_v, cad_f = prog_obj.evaluate()
         if len(cad_v) > 0:
-            mesh_path = os.path.join(out_dir, "output.stl")
+            if out_file and os.path.splitext(out_file)[1].lower() in (_MESH_EXTS | _STEP_EXTS):
+                mesh_path = out_file
+            else:
+                mesh_path = os.path.join(out_dir, "output.stl")
             from .stl_io import write_binary_stl
             write_binary_stl(mesh_path, cad_v, cad_f)
         else:
