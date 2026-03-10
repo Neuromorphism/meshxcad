@@ -1,4 +1,4 @@
-"""Catalog of 10 complex objects requiring non-revolve CAD operations.
+"""Catalog of 15 complex objects requiring non-revolve CAD operations.
 
 These objects use boolean cuts, extrusions, circular arrays, sweeps,
 and pattern features — operations that go beyond simple profile revolution.
@@ -16,6 +16,11 @@ Object list:
  8. Castellated ring   — revolve + rectangular notch pattern
  9. Gear shift knob    — revolve body + flat cuts + knurling
 10. Lattice panel      — grid array of cylindrical bars
+11. Pulley sheave      — grooved wheel + hub + keyway
+12. Heat sink          — base plate + rectangular fin array
+13. Cam disc           — eccentric cam profile + hub + follower track
+14. Hinge plate        — flat plate + barrel hinge + screw holes
+15. Hex bolt           — hex head + shank + thread detail
 """
 
 import math
@@ -661,6 +666,401 @@ def _lattice_ornate():
 
 _register("lattice_panel", "Lattice panel with diamond pattern and border",
           _lattice_simple, _lattice_ornate)
+
+
+# ============================================================================
+# 11. Pulley / Sheave (grooved wheel for belt drive)
+# ============================================================================
+
+def _pulley_simple():
+    """Simple pulley: plain solid cylinder (no bore, no groove, no spokes)."""
+    outer_r = 28
+    thickness = 8
+    profile = [(0.5, 0), (outer_r, 0), (outer_r, thickness), (0.5, thickness)]
+    return revolve_profile(profile, N_ANG)
+
+
+def _pulley_ornate():
+    """Ornate pulley: V-groove rim + spoked hub + keyway detail."""
+    outer_r = 30
+    bore_r = 6
+    hub_r = 12
+    thickness = 10
+    groove_depth = 4
+    groove_angle_half = 2.5  # half-width of the V-groove at rim
+
+    # Rim profile with V-groove
+    rim_profile = smooth_profile([
+        (outer_r - 2, 0), (outer_r, 0),                         # bottom lip
+        (outer_r, groove_angle_half - 0.5),                       # outer wall
+        (outer_r - groove_depth, thickness / 2),                  # groove bottom
+        (outer_r, thickness - groove_angle_half + 0.5),           # outer wall
+        (outer_r, thickness), (outer_r - 2, thickness),           # top lip
+    ], n_output=25)
+    rim = revolve_profile(rim_profile, N_ANG, close_top=False, close_bottom=False)
+
+    # Hub
+    hub_profile = smooth_profile([
+        (bore_r, 0), (hub_r, 0),
+        (hub_r + 1, 1), (hub_r + 1, thickness - 1),
+        (hub_r, thickness), (bore_r, thickness),
+    ], n_output=18)
+    hub = revolve_profile(hub_profile, N_ANG)
+
+    # Spokes connecting hub to rim (4 flat spokes)
+    spokes = []
+    spoke_w = 3
+    for i in range(4):
+        angle = 2 * math.pi * i / 4
+        cos_a, sin_a = math.cos(angle), math.sin(angle)
+        # Each spoke is a short extruded bar from hub_r to outer_r-2
+        sv = []
+        sf = []
+        n_seg = 8
+        for j in range(n_seg + 1):
+            frac = j / n_seg
+            r = hub_r + (outer_r - 2 - hub_r) * frac
+            cx = r * cos_a
+            cy = r * sin_a
+            # Cross-section: small rectangle perpendicular to radial direction
+            nx, ny = -sin_a, cos_a  # tangent direction
+            for dz in [thickness * 0.35, thickness * 0.65]:
+                for side in [-1, 1]:
+                    sv.append([cx + side * nx * spoke_w / 2,
+                               cy + side * ny * spoke_w / 2, dz])
+        sv = np.array(sv, dtype=np.float64)
+        n_cross = 4
+        for j in range(n_seg):
+            for k in range(n_cross):
+                k_next = (k + 1) % n_cross
+                p00 = j * n_cross + k
+                p01 = j * n_cross + k_next
+                p10 = (j + 1) * n_cross + k
+                p11 = (j + 1) * n_cross + k_next
+                sf.append([p00, p01, p10])
+                sf.append([p01, p11, p10])
+        spokes.append((sv, np.array(sf)))
+
+    # Keyway detail ring on bore
+    keyway_ring = make_torus(bore_r + 1.5, 0.6, thickness / 2, N_ANG, 6)
+
+    # Groove guide rings at rim edges
+    guide_top = make_torus(outer_r - 1, 0.5, thickness, N_ANG, 6)
+    guide_bot = make_torus(outer_r - 1, 0.5, 0, N_ANG, 6)
+
+    return combine_meshes([rim, hub] + spokes + [keyway_ring, guide_top, guide_bot])
+
+_register("pulley_sheave", "V-groove pulley with spoked hub (GrabCAD-style)",
+          _pulley_simple, _pulley_ornate)
+
+
+# ============================================================================
+# 12. Heat Sink (base plate + fin array)
+# ============================================================================
+
+def _heatsink_simple():
+    """Simple heat sink: plain rectangular block."""
+    w, d, h = 60, 40, 20
+    poly = [(-w / 2, -d / 2), (w / 2, -d / 2), (w / 2, d / 2), (-w / 2, d / 2)]
+    return extrude_polygon(poly, h)
+
+
+def _heatsink_ornate():
+    """Ornate heat sink: base plate + array of rectangular fins + mounting holes."""
+    w, d = 60, 40
+    base_h = 5
+    fin_h = 18
+    n_fins = 9
+    fin_t = 1.5
+    total_h = base_h + fin_h
+
+    meshes = []
+
+    # Base plate
+    base_poly = [(-w / 2, -d / 2), (w / 2, -d / 2), (w / 2, d / 2), (-w / 2, d / 2)]
+    base = extrude_polygon(base_poly, base_h)
+    meshes.append(base)
+
+    # Fins along X direction, spaced evenly along Y
+    fin_spacing = (d - 4) / (n_fins - 1)
+    for i in range(n_fins):
+        y_center = -d / 2 + 2 + fin_spacing * i
+        fin_poly = [
+            (-w / 2 + 2, y_center - fin_t / 2),
+            (w / 2 - 2, y_center - fin_t / 2),
+            (w / 2 - 2, y_center + fin_t / 2),
+            (-w / 2 + 2, y_center + fin_t / 2),
+        ]
+        fv, ff = extrude_polygon(fin_poly, fin_h)
+        # Shift fins up to sit on base plate
+        fv[:, 2] += base_h
+        meshes.append((fv, ff))
+
+    # Mounting hole rings (4 corners of base)
+    for sx, sy in [(-1, -1), (-1, 1), (1, -1), (1, 1)]:
+        hx = sx * (w / 2 - 5)
+        hy = sy * (d / 2 - 5)
+        ring = make_torus(2.5, 0.6, 0, 12, 6)
+        rv, rf = ring
+        rv_shifted = rv.copy()
+        rv_shifted[:, 0] += hx
+        rv_shifted[:, 1] += hy
+        meshes.append((rv_shifted, rf))
+
+    # Top edge chamfer rings on outermost fins
+    for y_edge in [-d / 2 + 2, d / 2 - 2]:
+        edge_ring = make_torus(w / 2 - 2, 0.4, total_h, 24, 6)
+        rv, rf = edge_ring
+        rv_shifted = rv.copy()
+        rv_shifted[:, 1] += y_edge
+        meshes.append((rv_shifted, rf))
+
+    return combine_meshes(meshes)
+
+_register("heat_sink", "Heat sink with rectangular fin array and mounting holes",
+          _heatsink_simple, _heatsink_ornate)
+
+
+# ============================================================================
+# 13. Cam Disc (eccentric cam with follower track)
+# ============================================================================
+
+def _cam_simple():
+    """Simple cam: plain circular disc."""
+    r = 25
+    h = 10
+    bore_r = 5
+    profile = [(bore_r, 0), (r, 0), (r, h), (bore_r, h)]
+    return revolve_profile(profile, N_ANG)
+
+
+def _cam_ornate():
+    """Ornate cam: eccentric cam profile + hub + keyway + follower track."""
+    base_r = 20
+    max_lift = 12
+    h = 10
+    bore_r = 5
+    hub_r = 10
+    hub_extend = 4
+
+    # Cam profile: radius varies with angle (single-lobe)
+    n_ang_cam = 72
+    cam_verts = []
+    cam_faces = []
+
+    for iz in range(3):  # bottom, mid, top
+        z = h * iz / 2
+        for ia in range(n_ang_cam):
+            angle = 2 * math.pi * ia / n_ang_cam
+            # Single harmonic cam: r = base_r + lift * (1 + cos(angle)) / 2
+            lift = max_lift * (1 + math.cos(angle)) / 2
+            r = base_r + lift
+            cam_verts.append([r * math.cos(angle), r * math.sin(angle), z])
+
+    cam_verts = np.array(cam_verts, dtype=np.float64)
+
+    for iz in range(2):
+        for ia in range(n_ang_cam):
+            ia_next = (ia + 1) % n_ang_cam
+            p00 = iz * n_ang_cam + ia
+            p01 = iz * n_ang_cam + ia_next
+            p10 = (iz + 1) * n_ang_cam + ia
+            p11 = (iz + 1) * n_ang_cam + ia_next
+            cam_faces.append([p00, p01, p10])
+            cam_faces.append([p01, p11, p10])
+
+    cam_body = (cam_verts, np.array(cam_faces))
+
+    # Hub (extended boss on one side)
+    hub_profile = smooth_profile([
+        (bore_r, -hub_extend), (hub_r, -hub_extend),
+        (hub_r + 1, -hub_extend + 1), (hub_r + 1, h + hub_extend - 1),
+        (hub_r, h + hub_extend), (bore_r, h + hub_extend),
+    ], n_output=20)
+    hub = revolve_profile(hub_profile, N_ANG)
+
+    # Bore detail
+    bore_ring_top = make_torus(bore_r + 1.5, 0.5, h + hub_extend, N_ANG, 6)
+    bore_ring_bot = make_torus(bore_r + 1.5, 0.5, -hub_extend, N_ANG, 6)
+
+    # Follower track (raised rail on the cam face)
+    track = make_torus(base_r + max_lift / 2, 0.8, h, N_ANG, 8)
+
+    # Keyway indicator
+    keyway = make_torus(hub_r - 1, 0.4, -hub_extend + 0.5, N_ANG, 6)
+
+    return combine_meshes([cam_body, hub, bore_ring_top, bore_ring_bot, track, keyway])
+
+_register("cam_disc", "Eccentric cam disc with hub and follower track",
+          _cam_simple, _cam_ornate)
+
+
+# ============================================================================
+# 14. Hinge Plate (flat plate + barrel hinge + screw holes)
+# ============================================================================
+
+def _hinge_simple():
+    """Simple hinge: plain thick rectangular plate (no barrel, no holes)."""
+    w, d, t = 45, 25, 5
+    poly = [(2, 2), (w - 2, 2), (w - 2, d - 2), (2, d - 2)]
+    return extrude_polygon(poly, t)
+
+
+def _hinge_ornate():
+    """Ornate hinge: plate + barrel hinge + screw holes + rounded corners."""
+    w, d, t = 50, 30, 3
+    barrel_r = 4
+    n_barrels = 3
+
+    meshes = []
+
+    # Main plate with slight inset around edges
+    poly = [(0, 0), (w, 0), (w, d), (0, d)]
+    plate = extrude_polygon(poly, t)
+    meshes.append(plate)
+
+    # Barrel hinge along the Y=0 edge (series of cylinders)
+    barrel_len = d / (n_barrels * 2 - 1)
+    for i in range(n_barrels):
+        y_start = i * 2 * barrel_len
+        y_end = y_start + barrel_len
+        # Barrel as a horizontal cylinder along Y
+        bv = []
+        bf = []
+        n_seg = 10
+        n_circ = 16
+        for iy in range(n_seg + 1):
+            y = y_start + (y_end - y_start) * iy / n_seg
+            for ic in range(n_circ):
+                angle = 2 * math.pi * ic / n_circ
+                bx = 0 + barrel_r * math.cos(angle)
+                bz = t / 2 + barrel_r * math.sin(angle)
+                bv.append([bx, y, bz])
+        bv = np.array(bv, dtype=np.float64)
+        for iy in range(n_seg):
+            for ic in range(n_circ):
+                ic_next = (ic + 1) % n_circ
+                p00 = iy * n_circ + ic
+                p01 = iy * n_circ + ic_next
+                p10 = (iy + 1) * n_circ + ic
+                p11 = (iy + 1) * n_circ + ic_next
+                bf.append([p00, p01, p10])
+                bf.append([p01, p11, p10])
+        meshes.append((bv, np.array(bf)))
+
+    # Hinge pin (thin cylinder through all barrels)
+    pin_profile = [(barrel_r * 0.25, -1), (barrel_r * 0.25, d + 1)]
+    pin = revolve_profile(pin_profile, 12, close_top=True, close_bottom=True)
+    pv, pf = pin
+    pv_shifted = pv.copy()
+    # Pin runs along Y, but revolve_profile creates along Z — rotate
+    pv_rotated = pv_shifted.copy()
+    pv_rotated[:, 0] = pv_shifted[:, 0]  # X stays
+    pv_rotated[:, 1] = pv_shifted[:, 2]  # Z -> Y
+    pv_rotated[:, 2] = pv_shifted[:, 1] + t / 2  # Y -> Z, shift up
+    meshes.append((pv_rotated, pf))
+
+    # Screw hole rings (countersunk pattern)
+    hole_positions = [(15, 10), (35, 10), (15, 20), (35, 20)]
+    for hx, hy in hole_positions:
+        ring = make_torus(2.5, 0.6, t, 12, 6)
+        rv, rf = ring
+        rv_shifted = rv.copy()
+        rv_shifted[:, 0] += hx
+        rv_shifted[:, 1] += hy
+        meshes.append((rv_shifted, rf))
+        # Countersink ring (slightly larger, on bottom)
+        csink = make_torus(3.5, 0.4, 0, 12, 6)
+        cv, cf = csink
+        cv_shifted = cv.copy()
+        cv_shifted[:, 0] += hx
+        cv_shifted[:, 1] += hy
+        meshes.append((cv_shifted, cf))
+
+    # Edge bead along long edges
+    edge_top = make_torus(w / 2, 0.3, t, 24, 6)
+    ev, ef = edge_top
+    ev[:, 1] += d
+    meshes.append((ev, ef))
+
+    return combine_meshes(meshes)
+
+_register("hinge_plate", "Hinge plate with barrel and screw holes",
+          _hinge_simple, _hinge_ornate)
+
+
+# ============================================================================
+# 15. Hex Bolt (hex head + shank + thread detail)
+# ============================================================================
+
+def _hexbolt_simple():
+    """Simple hex bolt: plain cylinder (shank only)."""
+    shank_r = 5
+    head_r = 10
+    total_h = 50
+    head_h = 7
+    profile = [
+        (0.1, 0), (shank_r, 0), (shank_r, total_h - head_h),
+        (head_r, total_h - head_h), (head_r, total_h), (0.1, total_h),
+    ]
+    return revolve_profile(profile, N_ANG)
+
+
+def _hexbolt_ornate():
+    """Ornate hex bolt: hex head + chamfered edges + shank + thread rings."""
+    shank_r = 5
+    head_r = 10
+    total_h = 50
+    head_h = 7
+    thread_start = 0
+    thread_end = total_h - head_h - 2  # leave unthreaded section near head
+
+    # Hex head
+    hex_body = extrude_polygon(
+        make_regular_polygon(6, head_r, start_angle=math.pi / 6),
+        head_h,
+    )
+    # Shift hex head to top
+    hv, hf = hex_body
+    hv_shifted = hv.copy()
+    hv_shifted[:, 2] += total_h - head_h
+    hex_mesh = (hv_shifted, hf)
+
+    # Head chamfers
+    top_chamfer = make_torus(head_r * 0.87, 0.8, total_h, 6, 8)
+    bot_chamfer = make_torus(head_r * 0.87, 0.8, total_h - head_h, 6, 8)
+
+    # Shank (plain cylinder)
+    shank_profile = [
+        (shank_r, thread_end), (shank_r, total_h - head_h),
+    ]
+    shank = revolve_profile(shank_profile, N_ANG, close_top=False, close_bottom=True)
+
+    # Thread section: helical ridges approximated as series of torus rings
+    thread_rings = []
+    thread_pitch = 2.0
+    n_threads = int((thread_end - thread_start) / thread_pitch)
+    for i in range(n_threads):
+        z = thread_start + thread_pitch * (i + 0.5)
+        ring = make_torus(shank_r + 0.3, 0.35, z, N_ANG, 6)
+        thread_rings.append(ring)
+
+    # Thread body (cylinder underneath the rings)
+    thread_body_profile = [(shank_r - 0.2, thread_start), (shank_r, thread_start),
+                           (shank_r, thread_end), (shank_r - 0.2, thread_end)]
+    thread_body = revolve_profile(thread_body_profile, N_ANG)
+
+    # Tip chamfer
+    tip_cone = make_torus(shank_r * 0.6, 0.5, 0, N_ANG, 6)
+
+    # Washer face ring under head
+    washer_ring = make_torus(shank_r + 2, 0.4, total_h - head_h, N_ANG, 6)
+
+    return combine_meshes([hex_mesh, top_chamfer, bot_chamfer, shank,
+                           thread_body, tip_cone, washer_ring] + thread_rings)
+
+_register("hex_bolt", "Hex bolt with thread detail and chamfered head",
+          _hexbolt_simple, _hexbolt_ornate)
 
 
 # ============================================================================
