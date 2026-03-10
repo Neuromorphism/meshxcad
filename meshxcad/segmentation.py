@@ -1094,12 +1094,26 @@ def detect_intersection_fillets(program, target_v, target_f):
 
             # Fillet candidates: near the intersection zone but not close
             # to either primitive surface
-            in_zone = d_target_to_zone < zone_radius * 1.5
-            not_on_a = d_target_to_a > proximity_threshold * 0.3
-            not_on_b = d_target_to_b > proximity_threshold * 0.3
+            # Use a tighter threshold to avoid including vertices that are
+            # clearly on one primitive's surface
+            coverage_thresh = proximity_threshold * 0.5
+            in_zone = d_target_to_zone < zone_radius * 1.2
+            not_on_a = d_target_to_a > coverage_thresh
+            not_on_b = d_target_to_b > coverage_thresh
             fillet_mask = in_zone & not_on_a & not_on_b
 
             fillet_verts = target_v[fillet_mask]
+
+            # Cap fillet vertices to < 20% of target to avoid marking
+            # too much of the mesh as fillet
+            if len(fillet_verts) > len(target_v) * 0.2:
+                # Tighten: increase coverage threshold
+                coverage_thresh = proximity_threshold * 0.8
+                not_on_a = d_target_to_a > coverage_thresh
+                not_on_b = d_target_to_b > coverage_thresh
+                fillet_mask = in_zone & not_on_a & not_on_b
+                fillet_verts = target_v[fillet_mask]
+
             if len(fillet_verts) < 5:
                 continue
 
