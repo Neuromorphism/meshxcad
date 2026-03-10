@@ -622,6 +622,115 @@ def make_simple_rocket(height=1.0, body_radius=0.1):
     return combine_meshes(parts)
 
 
+def make_sphere_in_cube(cube_size=1.0, sphere_radius=0.6, embed_depth=0.3,
+                        fillet_radius=0.15, n_fillet=16, n_lat=16, n_lon=24):
+    """Sphere partially embedded in one face of a cube, with fillet blend.
+
+    The fillet has a roughly triangular cross-section with one concave edge
+    (curving around the sphere) where sphere meets cube face.
+
+    Args:
+        cube_size: side length of the cube
+        sphere_radius: radius of the sphere
+        embed_depth: how far the sphere center is above the cube face
+                     (sphere extends embed_depth into the cube)
+        fillet_radius: radius of the fillet blend at the intersection
+        n_fillet: angular resolution of fillet along intersection ring
+        n_lat: sphere latitude divisions
+        n_lon: sphere longitude divisions
+    """
+    parts = []
+    half = cube_size / 2.0
+
+    # 1. Cube (top face at z=half)
+    from .reconstruct import _make_box_mesh
+    dims = np.array([cube_size, cube_size, cube_size])
+    cube_v, cube_f = _make_box_mesh(dims / 2, n_subdiv=4)
+    parts.append((cube_v, cube_f))
+
+    # 2. Sphere sitting on top face, partially embedded
+    sphere_center = np.array([0.0, 0.0, half + sphere_radius - embed_depth])
+    sphere_v, sphere_f = _sphere_mesh(sphere_center, sphere_radius,
+                                       n_lat=n_lat, n_lon=n_lon)
+    # Only keep sphere vertices above the cube top face (z > half - small eps)
+    # to avoid interior geometry
+    keep_mask = sphere_v[:, 2] > half - 0.01
+    if keep_mask.sum() > 10:
+        # Remap faces to only use kept vertices
+        idx_map = np.full(len(sphere_v), -1, dtype=int)
+        new_indices = np.where(keep_mask)[0]
+        idx_map[new_indices] = np.arange(len(new_indices))
+        kept_v = sphere_v[keep_mask]
+        valid_faces = []
+        for tri in sphere_f:
+            if all(idx_map[v] >= 0 for v in tri):
+                valid_faces.append([idx_map[tri[0]], idx_map[tri[1]], idx_map[tri[2]]])
+        if len(valid_faces) > 3:
+            parts.append((kept_v, np.array(valid_faces, dtype=np.int64)))
+        else:
+            parts.append((sphere_v, sphere_f))
+    else:
+        parts.append((sphere_v, sphere_f))
+
+    # 3. Fillet ring where sphere meets cube face
+    # The intersection circle is at z = half, radius = sqrt(R^2 - d^2)
+    # where d = distance from sphere center to cube face
+    d = sphere_center[2] - half  # = sphere_radius - embed_depth
+    if d < sphere_radius:
+        intersect_r = math.sqrt(sphere_radius**2 - d**2)
+    else:
+        intersect_r = 0.1
+
+    fillet_verts = []
+    fillet_faces = []
+    n_ring = max(n_fillet, 12)
+    n_cross = 6  # cross-section resolution
+
+    for i in range(n_ring):
+        theta = 2 * math.pi * i / n_ring
+        # Point on the intersection circle
+        cx = intersect_r * math.cos(theta)
+        cy = intersect_r * math.sin(theta)
+        cz = half
+
+        # Cross-section: triangular with concave inner edge
+        # The fillet connects: cube face (flat), sphere surface (concave),
+        # and the blend surface
+        # Radial outward direction from center
+        radial = np.array([math.cos(theta), math.sin(theta), 0.0])
+        up = np.array([0.0, 0.0, 1.0])
+
+        for j in range(n_cross):
+            t = j / (n_cross - 1)  # 0 to 1
+            # Outer edge on cube face, inner edge curves up along sphere
+            # Parametric: blend from (intersect_r + fillet_r, 0, half)
+            # to (intersect_r, 0, half + fillet_r * concave_curve)
+            r_offset = fillet_radius * (1.0 - t)
+            # Concave curve: the inner edge follows sphere curvature
+            z_offset = fillet_radius * t * (0.3 + 0.7 * math.sin(t * math.pi / 2))
+
+            pt = np.array([cx, cy, cz]) + radial * r_offset + up * z_offset
+            fillet_verts.append(pt)
+
+    fillet_verts = np.array(fillet_verts)
+
+    # Build faces for the fillet strip
+    for i in range(n_ring):
+        i_next = (i + 1) % n_ring
+        for j in range(n_cross - 1):
+            a = i * n_cross + j
+            b = i * n_cross + j + 1
+            c = i_next * n_cross + j
+            d_idx = i_next * n_cross + j + 1
+            fillet_faces.append([a, c, b])
+            fillet_faces.append([b, c, d_idx])
+
+    if len(fillet_verts) > 0 and len(fillet_faces) > 0:
+        parts.append((fillet_verts, np.array(fillet_faces, dtype=np.int64)))
+
+    return combine_meshes(parts)
+
+
 # ---------------------------------------------------------------------------
 # Master list of all test models
 # ---------------------------------------------------------------------------
@@ -642,6 +751,7 @@ ALL_TEST_MODELS = {
     "bottle": make_simple_bottle,
     "table": make_simple_table,
     "rocket": make_simple_rocket,
+    "sphere_in_cube": make_sphere_in_cube,
 }
 
 

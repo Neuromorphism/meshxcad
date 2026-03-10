@@ -1012,6 +1012,242 @@ def detect_fillets(vertices, faces, segments):
     return fillet_face_mask
 
 
+def detect_intersection_fillets(program, target_v, target_f):
+    """Post-fitting fillet detection: find blend regions at primitive intersections.
+
+    This implements the three-phase approach:
+    Phase 1: Primitives are already fitted (the program argument)
+    Phase 2: Compute pairwise intersection zones between ops
+    Phase 3: Find target mesh faces in these zones that aren't well-covered
+             by any single primitive — these are fillet/blend surfaces
+
+    A fillet has roughly triangular cross-section with one edge optionally
+    concave, extruded along the path where two primitives intersect.
+
+    Returns:
+        list of dicts, each describing a detected fillet:
+            op_a, op_b: indices of the two primitives
+            fillet_vertices: target vertices in the fillet zone
+            path: approximate intersection path (centerline)
+            concavity: estimated concavity of the fillet (0=flat, 1=fully concave)
+    """
+    from .cad_program import _eval_op
+
+    target_v = np.asarray(target_v, dtype=np.float64)
+    target_f = np.asarray(target_f)
+
+    ops = [(i, op) for i, op in enumerate(program.operations) if op.enabled]
+    if len(ops) < 2:
+        return []
+
+    # Evaluate each op to get its mesh
+    op_meshes = {}
+    for i, op in ops:
+        try:
+            result = _eval_op(op, [])
+            if result is not None:
+                op_meshes[i] = result  # (vertices, faces)
+        except Exception:
+            pass
+
+    if len(op_meshes) < 2:
+        return []
+
+    # Build KDTrees for each op mesh
+    op_trees = {}
+    for i, (v, f) in op_meshes.items():
+        if len(v) > 0:
+            op_trees[i] = KDTree(v)
+
+    target_tree = KDTree(target_v)
+    bbox_diag = float(np.linalg.norm(target_v.max(0) - target_v.min(0)))
+    proximity_threshold = bbox_diag * 0.08  # 8% of bbox diagonal
+
+    fillets = []
+    op_indices = list(op_meshes.keys())
+
+    for ai in range(len(op_indices)):
+        for bi in range(ai + 1, len(op_indices)):
+            idx_a, idx_b = op_indices[ai], op_indices[bi]
+            va, _ = op_meshes[idx_a]
+            vb, _ = op_meshes[idx_b]
+
+            if idx_a not in op_trees or idx_b not in op_trees:
+                continue
+
+            # Find vertices of A that are close to B (intersection zone)
+            d_a_to_b, _ = op_trees[idx_b].query(va)
+            near_a = va[d_a_to_b < proximity_threshold]
+
+            if len(near_a) < 3:
+                continue
+
+            # Intersection zone center and extent
+            zone_center = near_a.mean(axis=0)
+            zone_radius = float(np.max(np.linalg.norm(near_a - zone_center, axis=1)))
+
+            # Find target vertices in this zone that are NOT well-covered
+            # by either primitive alone
+            d_target_to_a, _ = op_trees[idx_a].query(target_v)
+            d_target_to_b, _ = op_trees[idx_b].query(target_v)
+            d_target_to_zone = np.linalg.norm(target_v - zone_center, axis=1)
+
+            # Fillet candidates: near the intersection zone but not close
+            # to either primitive surface
+            in_zone = d_target_to_zone < zone_radius * 1.5
+            not_on_a = d_target_to_a > proximity_threshold * 0.3
+            not_on_b = d_target_to_b > proximity_threshold * 0.3
+            fillet_mask = in_zone & not_on_a & not_on_b
+
+            fillet_verts = target_v[fillet_mask]
+            if len(fillet_verts) < 5:
+                continue
+
+            # Estimate intersection path (PCA primary direction of near_a)
+            centered = near_a - zone_center
+            if len(centered) >= 3:
+                cov = centered.T @ centered / len(centered)
+                eigvals, eigvecs = np.linalg.eigh(cov)
+                path_dir = eigvecs[:, np.argmax(eigvals)]
+            else:
+                path_dir = np.array([0, 0, 1.0])
+
+            # Estimate concavity: check if fillet vertices are inside
+            # the convex hull of the two primitives
+            # (approximation: check if fillet is between the two surfaces)
+            mean_dist_a = float(np.mean(d_target_to_a[fillet_mask]))
+            mean_dist_b = float(np.mean(d_target_to_b[fillet_mask]))
+            concavity = min(1.0, (mean_dist_a + mean_dist_b) / max(proximity_threshold, 1e-8))
+
+            fillets.append({
+                "op_a": idx_a,
+                "op_b": idx_b,
+                "fillet_vertices": fillet_verts,
+                "near_a": near_a,
+                "zone_center": zone_center,
+                "zone_radius": zone_radius,
+                "path_direction": path_dir,
+                "concavity": round(concavity, 3),
+                "n_vertices": len(fillet_verts),
+            })
+
+    return fillets
+
+
+def fit_fillet_op(fillet_info, target_v, target_f):
+    """Convert detected fillet info into a CadOp('fillet', params).
+
+    Uses the intersection zone geometry (from the primitives' proximity)
+    to determine the fillet path, then estimates cross-section radius from
+    the uncovered fillet vertices.
+
+    Args:
+        fillet_info: dict from detect_intersection_fillets()
+        target_v: full target mesh vertices
+        target_f: full target mesh faces
+
+    Returns:
+        CadOp or None
+    """
+    from .cad_program import CadOp
+
+    fillet_verts = np.asarray(fillet_info["fillet_vertices"], dtype=np.float64)
+    zone_center = np.asarray(fillet_info["zone_center"])
+    zone_radius = float(fillet_info["zone_radius"])
+    concavity = float(fillet_info["concavity"])
+    # Use near_a (intersection zone points from primitive A near B) for path
+    near_a = np.asarray(fillet_info.get("near_a", fillet_verts), dtype=np.float64)
+
+    if len(fillet_verts) < 5:
+        return None
+
+    # Determine path shape from intersection zone geometry (near_a)
+    centered_zone = near_a - zone_center
+    cov = centered_zone.T @ centered_zone / len(centered_zone)
+    eigvals, eigvecs = np.linalg.eigh(cov)
+    sort_idx = np.argsort(eigvals)[::-1]
+    eigvecs = eigvecs[:, sort_idx]
+    eigvals = eigvals[sort_idx]
+    spreads = np.sqrt(np.maximum(eigvals, 0))
+
+    # Ring detection: two large spreads, one small = planar ring
+    # Also detect when fillet vertices themselves suggest a ring
+    # by checking if they wrap around the zone center
+    centered_fv = fillet_verts - zone_center
+    proj_2d_fv = centered_fv @ eigvecs[:, :2]
+    angles_fv = np.arctan2(proj_2d_fv[:, 1], proj_2d_fv[:, 0])
+    # Check angular coverage — if vertices span >270° it's likely a ring
+    angle_range = float(np.ptp(angles_fv))
+    n_angle_bins = 12
+    bin_edges = np.linspace(-np.pi, np.pi, n_angle_bins + 1)
+    occupied_bins = sum(1 for k in range(n_angle_bins)
+                        if np.any((angles_fv >= bin_edges[k]) &
+                                  (angles_fv < bin_edges[k + 1])))
+    angular_coverage = occupied_bins / n_angle_bins
+
+    is_ring = (angular_coverage > 0.7 and
+               spreads[0] > 1e-6 and spreads[1] > 1e-6 and
+               spreads[1] / spreads[0] > 0.3)
+
+    if is_ring:
+        # Ring fillet: build path around the intersection circle
+        # Use near_a points (they lie on the intersection) to define the ring
+        proj_2d_zone = centered_zone @ eigvecs[:, :2]
+        angles_zone = np.arctan2(proj_2d_zone[:, 1], proj_2d_zone[:, 0])
+
+        n_path = min(32, max(12, len(near_a) // 3))
+        bin_edges_path = np.linspace(-np.pi, np.pi, n_path + 1)
+        path_pts = []
+        mean_r = float(np.mean(np.linalg.norm(proj_2d_zone, axis=1)))
+
+        for k in range(n_path):
+            mask = (angles_zone >= bin_edges_path[k]) & (angles_zone < bin_edges_path[k + 1])
+            if mask.sum() > 0:
+                path_pts.append(near_a[mask].mean(axis=0))
+            else:
+                t = (bin_edges_path[k] + bin_edges_path[k + 1]) / 2
+                pt_2d = np.array([mean_r * math.cos(t), mean_r * math.sin(t)])
+                pt_3d = zone_center + eigvecs[:, :2] @ pt_2d
+                path_pts.append(pt_3d)
+
+        path = np.array(path_pts)
+        closed = True
+    else:
+        # Open fillet: project onto primary axis and sample along it
+        path_dir = eigvecs[:, 0]
+        proj = centered_fv @ path_dir
+        sorted_idx = np.argsort(proj)
+        n_path = min(20, max(4, len(fillet_verts) // 5))
+        indices = np.linspace(0, len(sorted_idx) - 1, n_path, dtype=int)
+        path = fillet_verts[sorted_idx[indices]]
+        closed = False
+
+    # Estimate fillet radius from distance of fillet vertices to path
+    path_tree = KDTree(path)
+    d_to_path, _ = path_tree.query(fillet_verts)
+    fillet_radius = float(np.percentile(d_to_path, 50))
+    if fillet_radius < 1e-6:
+        fillet_radius = zone_radius * 0.15
+
+    # Determine up direction: perpendicular to the ring plane (if ring)
+    # or the smallest PCA component direction
+    if is_ring:
+        # Normal to the ring plane = smallest eigenvector
+        up_dir = eigvecs[:, 2].tolist()
+    else:
+        # Use the direction perpendicular to both path and radial spread
+        up_dir = eigvecs[:, 2].tolist() if len(eigvecs) > 2 else [0, 0, 1]
+
+    return CadOp("fillet", {
+        "path": path.tolist(),
+        "radius": fillet_radius,
+        "concavity": min(1.0, max(0.0, concavity * 0.5)),
+        "closed": closed,
+        "n_cross": 6,
+        "up_dir": up_dir,
+    })
+
+
 # ---------------------------------------------------------------------------
 # Top-level API
 # ---------------------------------------------------------------------------

@@ -1436,6 +1436,11 @@ def _mutate_for_elegance(program, target_v, target_f, rng):
         _try_feature_targeted_fill(
             program, target_v, target_f, mutations, rng)
 
+    # Strategy 17: Intersection fillet — detect uncovered blend regions
+    # between fitted primitives and add fillet ops to fill them
+    if program.n_enabled() >= 2 and acc < 0.995:
+        _try_intersection_fillet(program, target_v, target_f, mutations)
+
     return mutations
 
 
@@ -1694,6 +1699,62 @@ def _try_feature_targeted_fill(program, target_v, target_f, mutations, rng):
             for j in range(len(p.operations) - added, len(p.operations)):
                 refine_operation(p, j, target_v, target_f, max_iter=15)
             mutations.append(("multi_feature_fill", p))
+
+
+def _try_intersection_fillet(program, target_v, target_f, mutations):
+    """Detect uncovered blend regions between primitives and add fillet ops.
+
+    Uses detect_intersection_fillets() to find gaps at primitive intersections,
+    then fits fillet CadOps to fill them. This is a post-fitting strategy:
+    primitives are already in place, and fillets are added to cover the
+    transition zones that primitives can't reach.
+    """
+    try:
+        from .segmentation import detect_intersection_fillets, fit_fillet_op
+    except ImportError:
+        return
+
+    # Check if program already has fillets — avoid stacking
+    n_fillets = sum(1 for op in program.operations
+                    if op.enabled and op.op_type == "fillet")
+    if n_fillets >= 3:
+        return
+
+    try:
+        fillets = detect_intersection_fillets(program, target_v, target_f)
+    except Exception:
+        return
+
+    if not fillets:
+        return
+
+    # Sort by number of uncovered vertices (most impactful first)
+    fillets.sort(key=lambda f: f["n_vertices"], reverse=True)
+
+    for fl in fillets[:2]:  # Try at most 2 fillets per round
+        if fl["n_vertices"] < 10:
+            continue
+
+        try:
+            fillet_op = fit_fillet_op(fl, target_v, target_f)
+        except Exception:
+            continue
+
+        if fillet_op is None:
+            continue
+
+        p = program.copy()
+        p.operations.append(fillet_op)
+        p.invalidate_cache()
+
+        # Quick refine
+        try:
+            refine_operation(p, len(p.operations) - 1,
+                             target_v, target_f, max_iter=10)
+        except Exception:
+            pass
+
+        mutations.append(("intersection_fillet", p))
 
 
 def run_elegance_tournament(target_v, target_f, max_rounds=30, n_contestants=4):

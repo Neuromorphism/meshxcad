@@ -48,6 +48,7 @@ OP_COSTS = {
     "revolve": 2.0,
     "extrude": 1.5,
     "sweep": 3.0,
+    "fillet": 1.5,
     "translate": 0.2,
     "scale": 0.3,
     "rotate": 0.3,
@@ -329,6 +330,124 @@ class CadProgram:
 # Operation evaluators
 # ---------------------------------------------------------------------------
 
+def _eval_fillet_op(p):
+    """Evaluate a fillet CadOp.
+
+    A fillet is a blend surface with roughly triangular cross-section
+    extruded along a path (the intersection curve of two primitives).
+
+    The cross-section has three edges:
+    1. Edge on primitive A surface (outward/radial direction)
+    2. Edge on primitive B surface (upward/perpendicular direction)
+    3. The blend edge connecting them (optionally concave)
+
+    Params:
+        path: (K, 3) 3D path points along the intersection curve
+        radius: fillet radius (size of cross-section)
+        concavity: 0.0 = flat/chamfer, 1.0 = fully concave (circular blend)
+        closed: whether path forms a closed loop (default True)
+        n_cross: cross-section resolution (default 6)
+        up_dir: (3,) direction toward primitive B (default [0,0,1])
+    """
+    path = np.asarray(p.get("path", [[0, 0, 0], [1, 0, 0]]), dtype=np.float64)
+    radius = float(p.get("radius", 0.1))
+    concavity = float(p.get("concavity", 0.5))
+    closed = bool(p.get("closed", True))
+    n_cross = int(p.get("n_cross", 6))
+    up_dir = np.asarray(p.get("up_dir", [0, 0, 1]), dtype=np.float64)
+    n_path = len(path)
+
+    if n_path < 2:
+        return np.zeros((0, 3)), np.zeros((0, 3), dtype=int)
+
+    # Compute path center for radial direction computation
+    path_center = path.mean(axis=0)
+
+    # Normalize up direction
+    up_len = np.linalg.norm(up_dir)
+    if up_len > 1e-12:
+        up_dir = up_dir / up_len
+    else:
+        up_dir = np.array([0, 0, 1.0])
+
+    verts = []
+    for i in range(n_path):
+        # Tangent along the path
+        if closed:
+            tangent = path[(i + 1) % n_path] - path[(i - 1) % n_path]
+        else:
+            if i == 0:
+                tangent = path[1] - path[0]
+            elif i == n_path - 1:
+                tangent = path[-1] - path[-2]
+            else:
+                tangent = path[i + 1] - path[i - 1]
+        t_len = np.linalg.norm(tangent)
+        if t_len < 1e-12:
+            tangent = np.array([0, 0, 1.0])
+        else:
+            tangent /= t_len
+
+        # Radial direction: outward from path center, perpendicular to tangent
+        radial = path[i] - path_center
+        # Remove tangent component
+        radial -= np.dot(radial, tangent) * tangent
+        r_len = np.linalg.norm(radial)
+        if r_len < 1e-12:
+            # Fallback: use cross product of tangent and up
+            radial = np.cross(tangent, up_dir)
+            r_len = np.linalg.norm(radial)
+            if r_len < 1e-12:
+                radial = np.array([1, 0, 0.0])
+            else:
+                radial /= r_len
+        else:
+            radial /= r_len
+
+        # Cross-section: parametric curve from (path + radius*radial)
+        # to (path + radius*up_dir), with optional concavity
+        for j in range(n_cross):
+            t_param = j / max(n_cross - 1, 1)  # 0 to 1
+
+            # Linear interpolation endpoints
+            start_pt = path[i] + radius * radial
+            end_pt = path[i] + radius * up_dir
+
+            # Linear blend
+            pt = start_pt * (1.0 - t_param) + end_pt * t_param
+
+            # Concave inward displacement (toward path[i])
+            # Maximum at t=0.5, zero at endpoints
+            blend = concavity * radius * math.sin(t_param * math.pi) * 0.4
+            toward_path = path[i] - pt
+            tp_len = np.linalg.norm(toward_path)
+            if tp_len > 1e-12:
+                toward_path /= tp_len
+            pt += toward_path * blend
+
+            verts.append(pt)
+
+    verts = np.array(verts, dtype=np.float64)
+
+    # Build faces
+    faces = []
+    n_segs = n_path if closed else n_path - 1
+    for i in range(n_segs):
+        i_next = (i + 1) % n_path
+        for j in range(n_cross - 1):
+            a = i * n_cross + j
+            b = i * n_cross + j + 1
+            c = i_next * n_cross + j
+            d = i_next * n_cross + j + 1
+            faces.append([a, c, b])
+            faces.append([b, c, d])
+
+    if len(faces) == 0:
+        return np.zeros((0, 3)), np.zeros((0, 3), dtype=int)
+
+    return verts, np.array(faces, dtype=np.int64)
+
+
 def _eval_op(op, existing_meshes):
     """Evaluate a single CadOp, return (vertices, faces) or None."""
     p = op.params
@@ -442,6 +561,10 @@ def _eval_op(op, existing_meshes):
         profile = np.asarray(p.get("profile", [[1, 0], [0, 1], [-1, 0], [0, -1]]))
         path = np.asarray(p.get("path", [[0, 0, 0], [0, 0, 1]]))
         v, f = sweep_along_path(profile, path, n_profile=p.get("divs", 16))
+        return v, f
+
+    if t == "fillet":
+        v, f = _eval_fillet_op(p)
         return v, f
 
     # --- Modifiers: operate on accumulated meshes ---

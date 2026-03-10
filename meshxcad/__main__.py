@@ -739,6 +739,63 @@ def _run_refine(args):
     print(f"Saved to: {out_path}")
 
 
+def _run_detect_fillets(args):
+    """Detect intersection fillets and optionally add them to the program."""
+    from .cad_program import CadProgram
+    from .segmentation import detect_intersection_fillets, fit_fillet_op
+    from .elegance import score_accuracy
+
+    target_v, target_f = load_mesh(args.mesh)
+    target_v = np.asarray(target_v, dtype=np.float64)
+    target_f = np.asarray(target_f)
+
+    with open(args.program) as f:
+        prog_data = json.load(f)
+    if "program" in prog_data and "operations" in prog_data["program"]:
+        prog = CadProgram.from_dict(prog_data["program"])
+    elif "operations" in prog_data:
+        prog = CadProgram.from_dict(prog_data)
+    else:
+        print("Error: cannot find operations in program JSON", file=sys.stderr)
+        sys.exit(1)
+
+    acc_before = score_accuracy(prog, target_v, target_f)
+    print(f"Program: {prog.summary()}")
+    print(f"Accuracy: {acc_before:.4f}")
+    print()
+
+    fillets = detect_intersection_fillets(prog, target_v, target_f)
+    if not fillets:
+        print("No intersection fillets detected.")
+        return
+
+    print(f"Detected {len(fillets)} fillet region(s):")
+    for i, fl in enumerate(fillets):
+        print(f"  [{i}] ops ({fl['op_a']}, {fl['op_b']}): "
+              f"{fl['n_vertices']} vertices, "
+              f"concavity={fl['concavity']:.3f}, "
+              f"zone_radius={fl['zone_radius']:.3f}")
+
+    if args.add:
+        for fl in fillets:
+            fillet_op = fit_fillet_op(fl, target_v, target_f)
+            if fillet_op:
+                prog.operations.append(fillet_op)
+                prog.invalidate_cache()
+                print(f"  Added fillet op: closed={fillet_op.params['closed']}, "
+                      f"radius={fillet_op.params['radius']:.4f}")
+
+        acc_after = score_accuracy(prog, target_v, target_f)
+        print(f"\nAccuracy after fillets: {acc_after:.4f} "
+              f"(delta={acc_after - acc_before:+.4f})")
+        print(f"Program: {prog.summary()}")
+
+        out_path = args.output or args.program
+        with open(out_path, "w") as f_out:
+            json.dump(prog.to_dict(), f_out, indent=2)
+        print(f"Saved to: {out_path}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="meshxcad",
@@ -761,6 +818,7 @@ individual tools (for agent use):
   python -m meshxcad reconstruct part.stl         # reconstruct CAD mesh
   python -m meshxcad score part.stl program.json  # score a program
   python -m meshxcad refine part.stl program.json # refine a program
+  python -m meshxcad detect-fillets part.stl prog.json --add  # detect & add fillets
 
 drawing mode:
   python -m meshxcad drawing input.png            # interpret drawing → CAD
@@ -842,6 +900,16 @@ drawing mode:
     refine_p.add_argument("--iterations", type=int, default=30,
                            help="Max refinement iterations per op (default: 30)")
 
+    # detect-fillets: detect intersection fillets in a fitted program
+    fillet_p = subparsers.add_parser("detect-fillets",
+                                      help="Detect fillet/blend regions between fitted primitives")
+    fillet_p.add_argument("mesh", help="Target mesh file")
+    fillet_p.add_argument("program", help="CadProgram JSON file")
+    fillet_p.add_argument("--add", action="store_true",
+                           help="Add fillet ops to the program and save")
+    fillet_p.add_argument("-o", "--output", default=None,
+                           help="Output JSON path (default: overwrite if --add)")
+
     # Drawing subcommand
     draw_parser = subparsers.add_parser("drawing",
                                          help="Interpret a mechanical drawing → CAD")
@@ -915,6 +983,9 @@ drawing mode:
         return
     if args.command == "refine":
         _run_refine(args)
+        return
+    if args.command == "detect-fillets":
+        _run_detect_fillets(args)
         return
 
     # --- Validate inputs ---
