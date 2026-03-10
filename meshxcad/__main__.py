@@ -868,6 +868,29 @@ def _run_auto(args):
         print(json.dumps(summary))
 
 
+def _run_gpu_info(args):
+    """Show GPU backend status."""
+    from .gpu import gpu_info
+    info = gpu_info()
+    if getattr(args, 'json', False):
+        print(json.dumps(info, indent=2))
+    else:
+        print(f"Backend:       {info['backend']}")
+        print(f"GPU available: {info['gpu_available']}")
+        if info.get('device_name'):
+            print(f"Device:        {info['device_name']}")
+        if info.get('gpu_memory_total_mb'):
+            print(f"GPU memory:    {info.get('gpu_memory_free_mb', '?')} / "
+                  f"{info['gpu_memory_total_mb']} MB")
+        if info['forced_cpu']:
+            print(f"Note: GPU forced off via MESHXCAD_CPU=1")
+        if not info['gpu_available']:
+            print(f"\nTo enable GPU acceleration, install one of:")
+            print(f"  pip install cupy-cuda12x    # CuPy (recommended)")
+            print(f"  pip install torch           # PyTorch with CUDA")
+            print(f"  pip install numba           # Numba CUDA")
+
+
 def _run_detect_fillets(args):
     """Detect intersection fillets and optionally add them to the program."""
     from .cad_program import CadProgram
@@ -955,6 +978,9 @@ individual tools:
 
 drawing mode:
   python -m meshxcad drawing input.png            # interpret drawing → CAD
+
+gpu:
+  python -m meshxcad gpu                          # show GPU backend status
 """,
     )
 
@@ -1060,6 +1086,12 @@ drawing mode:
     auto_p.add_argument("--json-only", action="store_true",
                          help="Only output JSON (no mesh STL)")
 
+    # gpu: show backend status
+    gpu_p = subparsers.add_parser("gpu",
+                                   help="Show GPU acceleration backend status")
+    gpu_p.add_argument("--json", action="store_true",
+                        help="Output as JSON")
+
     # Drawing subcommand
     draw_parser = subparsers.add_parser("drawing",
                                          help="Interpret a mechanical drawing → CAD")
@@ -1088,7 +1120,7 @@ drawing mode:
     # the top-level positional 'mesh' arg (it conflicts with subparsers).
     _known_subcommands = {
         "auto", "drawing", "classify", "complexity", "segment", "fit",
-        "profile", "reconstruct", "score", "refine", "detect-fillets",
+        "profile", "reconstruct", "score", "refine", "detect-fillets", "gpu",
     }
     _is_subcommand = (len(sys.argv) > 1 and sys.argv[1] in _known_subcommands)
 
@@ -1128,6 +1160,7 @@ drawing mode:
         "score":          _run_score,
         "refine":         _run_refine,
         "detect-fillets": _run_detect_fillets,
+        "gpu":            _run_gpu_info,
     }
 
     if args.command in _subcommand_dispatch:

@@ -3,6 +3,7 @@
 import itertools
 import numpy as np
 from scipy.spatial import KDTree
+from .gpu import AcceleratedKDTree as _AKDTree, svd as _gpu_svd, eigh as _gpu_eigh
 
 
 def icp(source, target, max_iterations=50, tolerance=1e-6):
@@ -25,7 +26,7 @@ def icp(source, target, max_iterations=50, tolerance=1e-6):
     prev_error = float("inf")
 
     for _ in range(max_iterations):
-        tree = KDTree(target)
+        tree = _AKDTree(target)
         distances, indices = tree.query(src)
         mean_error = np.mean(distances)
 
@@ -43,7 +44,7 @@ def icp(source, target, max_iterations=50, tolerance=1e-6):
 
         # SVD for optimal rotation
         H = src_centered.T @ tgt_centered
-        U, _, Vt = np.linalg.svd(H)
+        U, _, Vt = _gpu_svd(H)
         R = Vt.T @ U.T
 
         # Ensure proper rotation (det = +1)
@@ -74,7 +75,7 @@ def find_correspondences(source_points, target_points, max_distance=None):
         target_indices: corresponding indices into target_points
         distances: distances between correspondences
     """
-    tree = KDTree(target_points)
+    tree = _AKDTree(target_points)
     distances, indices = tree.query(source_points)
 
     if max_distance is not None:
@@ -119,7 +120,7 @@ def _pca_axes(points):
     """Return PCA eigenvectors sorted by descending eigenvalue."""
     centered = points - points.mean(axis=0)
     cov = centered.T @ centered / len(points)
-    eigvals, eigvecs = np.linalg.eigh(cov)
+    eigvals, eigvecs = _gpu_eigh(cov)
     order = np.argsort(eigvals)[::-1]
     return eigvecs[:, order], np.sqrt(np.maximum(eigvals[order], 0))
 
@@ -219,7 +220,7 @@ def pre_align(source, target, subsample=2000):
         tgt_sub = tgt_c[rng.choice(len(tgt_c), subsample, replace=False)]
     else:
         tgt_sub = tgt_c
-    tgt_tree = KDTree(tgt_sub)
+    tgt_tree = _AKDTree(tgt_sub)
 
     best_scale = 1.0
     best_R = np.eye(3)

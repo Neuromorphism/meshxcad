@@ -17,6 +17,7 @@ score indicating how well that action can reproduce the geometry.
 import math
 import numpy as np
 from scipy.spatial import KDTree
+from .gpu import AcceleratedKDTree as _AKDTree
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
@@ -144,7 +145,7 @@ def _extract_skeleton(vertices, faces, n_samples=500):
 
     # Assign faces to nearest path point
     fc = _face_centroids(vertices, faces)
-    tree = KDTree(path)
+    tree = _AKDTree(path)
     _, assignments = tree.query(fc)
 
     return path, assignments
@@ -218,7 +219,7 @@ def segment_by_skeleton(vertices, faces, min_segment_faces=20):
                 labeled_centroids.append(fc[seg_mask].mean(axis=0))
                 labeled_ids.append(si)
         if labeled_centroids:
-            tree = KDTree(np.array(labeled_centroids))
+            tree = _AKDTree(np.array(labeled_centroids))
             _, nearest = tree.query(fc[orphans])
             for oi, ni in zip(orphans, nearest):
                 labels[oi] = labeled_ids[ni]
@@ -273,7 +274,7 @@ def _compute_sdf(vertices, faces, n_rays=10):
     fn = _face_normals(vertices, faces)
     n_faces = len(faces)
 
-    tree = KDTree(fc)
+    tree = _AKDTree(fc)
 
     sdf_values = np.zeros(n_faces)
     for i in range(n_faces):
@@ -951,7 +952,7 @@ def detect_fillets(vertices, faces, segments):
     # Phase 2: Topological validation — confirm fillet segments border
     # multiple other segments (true fillets are transitions between
     # two distinct primitives)
-    global_tree = KDTree(v)
+    global_tree = _AKDTree(v)
 
     for seg in segments:
         if len(seg.faces) < 3 or len(seg.vertices) < 3:
@@ -979,7 +980,7 @@ def detect_fillets(vertices, faces, segments):
             dist = float(np.linalg.norm(seg_center - other.centroid))
             # Also check if any vertices are close
             if len(other.vertices) > 0:
-                other_tree = KDTree(other.vertices)
+                other_tree = _AKDTree(other.vertices)
                 d, _ = other_tree.query(seg_v)
                 close_count = (d < np.linalg.norm(
                     v.max(0) - v.min(0)) * 0.05).sum()
@@ -1057,9 +1058,9 @@ def detect_intersection_fillets(program, target_v, target_f):
     op_trees = {}
     for i, (v, f) in op_meshes.items():
         if len(v) > 0:
-            op_trees[i] = KDTree(v)
+            op_trees[i] = _AKDTree(v)
 
-    target_tree = KDTree(target_v)
+    target_tree = _AKDTree(target_v)
     bbox_diag = float(np.linalg.norm(target_v.max(0) - target_v.min(0)))
     proximity_threshold = bbox_diag * 0.08  # 8% of bbox diagonal
 
@@ -1237,7 +1238,7 @@ def fit_fillet_op(fillet_info, target_v, target_f):
         closed = False
 
     # Estimate fillet radius from distance of fillet vertices to path
-    path_tree = KDTree(path)
+    path_tree = _AKDTree(path)
     d_to_path, _ = path_tree.query(fillet_verts)
     fillet_radius = float(np.percentile(d_to_path, 50))
     if fillet_radius < 1e-6:

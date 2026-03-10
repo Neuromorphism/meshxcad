@@ -2,6 +2,7 @@
 
 import numpy as np
 from scipy.spatial import KDTree
+from .gpu import AcceleratedKDTree as _AKDTree
 from scipy.interpolate import RBFInterpolator
 
 from . import mesh_io, alignment
@@ -30,7 +31,7 @@ def compute_detail_displacement(plain_vertices, featured_vertices, plain_faces,
     """
     def _try_candidate(aligned_featured):
         """Score a candidate by the final result distance (after displacement + outlier clamping)."""
-        tree = KDTree(aligned_featured)
+        tree = _AKDTree(aligned_featured)
         distances, indices = tree.query(plain_vertices)
         disp = aligned_featured[indices] - plain_vertices
         mags = np.linalg.norm(disp, axis=1)
@@ -43,7 +44,7 @@ def compute_detail_displacement(plain_vertices, featured_vertices, plain_faces,
                 disp = disp * s[:, None]
         result = plain_vertices + disp
         # Measure how close result is to the original (unaligned) featured mesh
-        feat_tree = KDTree(featured_vertices)
+        feat_tree = _AKDTree(featured_vertices)
         rd, _ = feat_tree.query(result)
         return float(np.mean(rd)), disp
 

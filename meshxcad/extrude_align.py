@@ -22,6 +22,7 @@ Given a CAD model built from extrusions and a target mesh, these tools let you:
 import math
 import numpy as np
 from scipy.spatial import ConvexHull, KDTree
+from .gpu import AcceleratedKDTree as _AKDTree
 from scipy.interpolate import CubicSpline
 
 
@@ -223,9 +224,9 @@ def compare_cross_sections(profile_a, profile_b, n_sample=64):
     a = _resample_polygon(np.asarray(profile_a), n_sample)
     b = _resample_polygon(np.asarray(profile_b), n_sample)
 
-    tree_b = KDTree(b)
+    tree_b = _AKDTree(b)
     dists_a, _ = tree_b.query(a)
-    tree_a = KDTree(a)
+    tree_a = _AKDTree(a)
     dists_b, _ = tree_a.query(b)
 
     hausdorff = float(max(np.max(dists_a), np.max(dists_b)))
@@ -318,7 +319,7 @@ def fit_primitive_to_cross_section(points):
                  cy + mean_r * math.sin(start_a + 2 * math.pi * i / n_sides)]
                 for i in range(n_sides)
             ])
-            tree = KDTree(poly)
+            tree = _AKDTree(poly)
             dists, _ = tree.query(pts)
             res = float(np.mean(dists))
             if res < best_res:
@@ -1342,13 +1343,12 @@ def compare_sweep_to_mesh(sweep_v, sweep_f, mesh_v, mesh_f):
     Returns:
         dict with hausdorff, mean_dist, coverage, quality_score (0-100)
     """
-    from scipy.spatial import KDTree
     sv = np.asarray(sweep_v, dtype=np.float64)
     mv = np.asarray(mesh_v, dtype=np.float64)
 
-    tree_m = KDTree(mv)
+    tree_m = _AKDTree(mv)
     d_s2m, _ = tree_m.query(sv)
-    tree_s = KDTree(sv)
+    tree_s = _AKDTree(sv)
     d_m2s, _ = tree_s.query(mv)
 
     hausdorff = float(max(np.max(d_s2m), np.max(d_m2s)))
@@ -1739,7 +1739,7 @@ def sweep_path_deviation(cad_v, cad_f, mesh_v, mesh_f, n_points=15):
     if len(skel_cad) == 0 or len(skel_mesh) == 0:
         return 0.0
 
-    tree = KDTree(skel_mesh)
+    tree = _AKDTree(skel_mesh)
     dists, _ = tree.query(skel_cad)
     bbox_diag = float(np.linalg.norm(
         np.asarray(mesh_v).max(axis=0) - np.asarray(mesh_v).min(axis=0)))
@@ -1862,7 +1862,7 @@ def fix_sweep_path_deviation(cad_v, cad_f, mesh_v, mesh_f):
     if len(skel_mesh) < 2:
         return v
 
-    tree = KDTree(mv)
+    tree = _AKDTree(mv)
     _, idx = tree.query(v)
     v = v * 0.65 + mv[idx] * 0.35
     return v

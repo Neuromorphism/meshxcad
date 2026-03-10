@@ -23,6 +23,8 @@ import copy
 import time
 import numpy as np
 from typing import Optional
+from scipy.spatial import KDTree
+from .gpu import AcceleratedKDTree as _AKDTree
 
 
 def auto_pipeline(target_v, target_f, *,
@@ -322,7 +324,6 @@ def _fill_gaps(program, target_v, target_f, budget, verbose):
     """
     from .cad_program import CadProgram, _make_candidate_op, _eval_op
     from .elegance import score_accuracy
-    from scipy.spatial import KDTree
 
     if program.n_enabled() >= budget:
         return 0
@@ -333,7 +334,7 @@ def _fill_gaps(program, target_v, target_f, budget, verbose):
         return 0
 
     # Find uncovered target vertices
-    tree = KDTree(cad_v)
+    tree = _AKDTree(cad_v)
     dists, _ = tree.query(target_v)
 
     bbox_diag = float(np.linalg.norm(target_v.max(0) - target_v.min(0)))
@@ -396,7 +397,6 @@ def _cluster_vertices(vertices, max_clusters=5):
     if len(vertices) < 8:
         return [vertices]
 
-    from scipy.spatial import KDTree
 
     # Use farthest-point sampling to pick cluster seeds
     n = len(vertices)
@@ -412,7 +412,7 @@ def _cluster_vertices(vertices, max_clusters=5):
 
     # Assign each vertex to nearest seed
     seed_pts = vertices[seeds]
-    tree = KDTree(seed_pts)
+    tree = _AKDTree(seed_pts)
     _, labels = tree.query(vertices)
 
     clusters = []

@@ -15,6 +15,7 @@ Pipeline:
 import math
 import numpy as np
 from scipy.spatial import KDTree
+from .gpu import AcceleratedKDTree as _AKDTree, covariance_pca as _gpu_pca, eigh as _gpu_eigh
 
 from .stl_io import read_binary_stl, write_binary_stl
 from .general_align import hausdorff_distance
@@ -111,7 +112,7 @@ def fit_cylinder(vertices):
 
     # PCA for candidate axes
     cov = centered.T @ centered / len(v)
-    eigvals, eigvecs = np.linalg.eigh(cov)
+    eigvals, eigvecs = _gpu_eigh(cov)
     order = np.argsort(eigvals)[::-1]
     eigvecs = eigvecs[:, order]
 
@@ -235,7 +236,7 @@ def fit_cone(vertices):
     centered = v - center
 
     cov = centered.T @ centered / len(v)
-    eigvals, eigvecs = np.linalg.eigh(cov)
+    eigvals, eigvecs = _gpu_eigh(cov)
     order = np.argsort(eigvals)[::-1]
     eigvecs = eigvecs[:, order]
     axis = eigvecs[:, 0]
@@ -300,7 +301,7 @@ def fit_profiled_cylinder(vertices, n_sections=8):
 
     # PCA for axis
     cov = centered.T @ centered / len(v)
-    eigvals, eigvecs = np.linalg.eigh(cov)
+    eigvals, eigvecs = _gpu_eigh(cov)
     order = np.argsort(eigvals)[::-1]
 
     # Try all 3 axes, pick best
@@ -402,7 +403,7 @@ def fit_revolve_profile(vertices, n_slices=20):
 
     # PCA for axis
     cov = centered.T @ centered / len(v)
-    eigvals, eigvecs = np.linalg.eigh(cov)
+    eigvals, eigvecs = _gpu_eigh(cov)
     order = np.argsort(eigvals)[::-1]
 
     # Try the principal axis (longest) as revolve axis
@@ -487,7 +488,7 @@ def fit_box(vertices):
     centered = v - center
 
     cov = centered.T @ centered / len(v)
-    eigvals, eigvecs = np.linalg.eigh(cov)
+    eigvals, eigvecs = _gpu_eigh(cov)
     order = np.argsort(eigvals)[::-1]
     eigvecs = eigvecs[:, order]
 
@@ -873,7 +874,7 @@ def reconstruct_freeform(vertices, faces, n_slices=20, n_profile=32):
     center = v.mean(axis=0)
     centered = v - center
     cov = centered.T @ centered / len(v)
-    eigvals, eigvecs = np.linalg.eigh(cov)
+    eigvals, eigvecs = _gpu_eigh(cov)
     order = np.argsort(eigvals)[::-1]
     eigvecs = eigvecs[:, order]
     axis = eigvecs[:, 0]

@@ -14,6 +14,7 @@ Given a plain STEP model and a detailed scan mesh, this module:
 import math
 import numpy as np
 from scipy.spatial import KDTree
+from .gpu import AcceleratedKDTree as _AKDTree
 
 from . import alignment
 from .stl_io import read_binary_stl
@@ -131,7 +132,7 @@ def identify_detail_regions(plain_verts, detail_verts, plain_faces,
         detail_verts, plain_verts)
 
     # Correspondences
-    tree = KDTree(aligned_detail)
+    tree = _AKDTree(aligned_detail)
     distances, indices = tree.query(plain_verts)
     displacements = aligned_detail[indices] - plain_verts
 

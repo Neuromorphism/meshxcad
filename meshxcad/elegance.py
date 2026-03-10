@@ -41,6 +41,8 @@ from typing import Optional
 
 from scipy.spatial import KDTree
 
+from .gpu import AcceleratedKDTree as _AKDTree
+
 from .general_align import (
     hausdorff_distance, surface_distance_map, _compute_vertex_normals,
     _compute_face_normals, _face_areas, _vertex_adjacency,
@@ -158,7 +160,7 @@ def score_symmetry_exploitation(program, target_v):
         reflected = centered.copy()
         reflected[:, axis_idx] *= -1
         # Compare point clouds (approximate symmetry check)
-        tree = KDTree(centered)
+        tree = _AKDTree(centered)
         dists, _ = tree.query(reflected)
         bbox_diag = np.linalg.norm(centered.max(0) - centered.min(0))
         rel_error = dists.mean() / max(bbox_diag, 1e-8)
@@ -568,7 +570,7 @@ def score_feature_fidelity(program, target_v, target_f):
     # Tight coverage threshold: 5% of bounding box diagonal
     coverage_thresh = bbox_diag * 0.05
 
-    cad_tree = KDTree(cad_v)
+    cad_tree = _AKDTree(cad_v)
 
     weighted_score = 0.0
     total_weight = 0.0
@@ -1132,8 +1134,7 @@ def _generate_anti_cad_mutations(program, features, target_v, target_f):
 
 def _try_subtract_mutations(program, cad_v, target_v, target_f, mutations):
     """Try adding subtract_cylinder ops where the CAD mesh overshoots."""
-    from scipy.spatial import KDTree
-    tree_target = KDTree(target_v)
+    tree_target = _AKDTree(target_v)
     dists_from_cad, _ = tree_target.query(cad_v)
 
     # Find vertices where CAD extends beyond target (overshoot)
@@ -1407,8 +1408,7 @@ def _mutate_for_elegance(program, target_v, target_f, rng):
                     if op_mesh is None:
                         continue
                     op_v, _ = op_mesh
-                    from scipy.spatial import KDTree
-                    tree = KDTree(op_v)
+                    tree = _AKDTree(op_v)
                     bbox_diag = float(np.linalg.norm(
                         target_v.max(0) - target_v.min(0)))
                     d, _ = tree.query(target_v)
@@ -1447,8 +1447,7 @@ def _mutate_for_elegance(program, target_v, target_f, rng):
 def _try_subtract_for_elegance(program, cad_v, target_v, target_f,
                                 mutations, rng):
     """Try subtract_cylinder where CAD overshoots target."""
-    from scipy.spatial import KDTree
-    tree_target = KDTree(target_v)
+    tree_target = _AKDTree(target_v)
     dists, _ = tree_target.query(cad_v)
 
     threshold = max(np.percentile(dists, 80), 1e-6)
@@ -1576,7 +1575,7 @@ def _try_feature_targeted_fill(program, target_v, target_f, mutations, rng):
     bbox_diag = float(np.linalg.norm(target_v.max(0) - target_v.min(0)))
     coverage_thresh = bbox_diag * 0.05
 
-    cad_tree = KDTree(cad_v)
+    cad_tree = _AKDTree(cad_v)
 
     # Score each feature by coverage
     scored = []

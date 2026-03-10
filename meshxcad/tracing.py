@@ -18,6 +18,7 @@ Pipeline:
 
 import numpy as np
 from scipy.spatial import KDTree
+from .gpu import AcceleratedKDTree as _AKDTree
 
 from .segmentation import (
     segment_mesh, MeshSegment, classify_segment_action,

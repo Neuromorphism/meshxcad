@@ -21,6 +21,7 @@ from dataclasses import dataclass, field, asdict
 from typing import Optional
 
 from scipy.spatial import KDTree
+from .gpu import AcceleratedKDTree as _AKDTree, covariance_pca as _gpu_pca, eigh as _gpu_eigh
 
 from .general_align import hausdorff_distance, surface_distance_map
 from .reconstruct import (
@@ -665,7 +666,7 @@ def find_program_gaps(program, target_v, target_f, max_gaps=5):
         )]
 
     # Compute per-vertex distances from target to CAD
-    tree_cad = KDTree(cad_v)
+    tree_cad = _AKDTree(cad_v)
     dists_to_cad, _ = tree_cad.query(target_v)
 
     # Find high-residual regions via percentile threshold
@@ -757,7 +758,7 @@ def _classify_gap(points, center, radius, target_v, target_f):
 
     # PCA to understand gap shape
     cov = centered.T @ centered / len(pts)
-    eigvals, eigvecs = np.linalg.eigh(cov)
+    eigvals, eigvecs = _gpu_eigh(cov)
     order = np.argsort(eigvals)[::-1]
     eigvals = eigvals[order]
 
@@ -1220,7 +1221,7 @@ def _axial_segmented_program(target_v, target_f, n_segments=None):
 
     # PCA for principal axis
     cov = centered.T @ centered / len(v)
-    eigvals, eigvecs = np.linalg.eigh(cov)
+    eigvals, eigvecs = _gpu_eigh(cov)
     order = np.argsort(eigvals)[::-1]
     axis = eigvecs[:, order[0]]
     if axis[2] < 0:

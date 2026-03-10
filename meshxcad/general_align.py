@@ -28,6 +28,14 @@ import math
 import numpy as np
 from scipy.spatial import KDTree
 
+from .gpu import (AcceleratedKDTree as _AKDTree,
+                  hausdorff_distance_gpu as _hausdorff_gpu,
+                  is_gpu_available as _gpu_ok,
+                  compute_vertex_normals as _gpu_vertex_normals,
+                  compute_face_normals as _gpu_face_normals,
+                  row_norms as _gpu_row_norms,
+                  build_vertex_adjacency_matrix as _gpu_build_adj)
+
 
 # =========================================================================
 # Helpers
@@ -66,13 +74,14 @@ def _face_areas(vertices, faces):
 
 
 def _vertex_adjacency(faces, n_verts):
-    """Build vertex adjacency list from faces."""
+    """Build vertex adjacency list from faces (vectorized)."""
+    f = np.asarray(faces)
+    # Build all edge pairs in one shot
+    rows = np.concatenate([f[:, 0], f[:, 0], f[:, 1], f[:, 1], f[:, 2], f[:, 2]])
+    cols = np.concatenate([f[:, 1], f[:, 2], f[:, 0], f[:, 2], f[:, 0], f[:, 1]])
     adj = [set() for _ in range(n_verts)]
-    for f in faces:
-        for i in range(3):
-            for j in range(3):
-                if i != j:
-                    adj[f[i]].add(f[j])
+    for r, c in zip(rows, cols):
+        adj[r].add(c)
     return adj
 
 
@@ -111,7 +120,7 @@ def surface_distance_map(cad_vertices, cad_faces, mesh_vertices):
     mesh_v = np.asarray(mesh_vertices, dtype=np.float64)
     cad_normals = _compute_vertex_normals(cad_v, np.asarray(cad_faces))
 
-    tree = KDTree(mesh_v)
+    tree = _AKDTree(mesh_v)
     dists, idx = tree.query(cad_v)
     disp = mesh_v[idx] - cad_v
     signs = np.sign(np.sum(disp * cad_normals, axis=1))
@@ -133,6 +142,8 @@ def surface_distance_map(cad_vertices, cad_faces, mesh_vertices):
 def hausdorff_distance(vertices_a, vertices_b):
     """Symmetric Hausdorff distance and mean surface distance.
 
+    Uses GPU acceleration when available (CuPy / PyTorch CUDA).
+
     Args:
         vertices_a: (N, 3)
         vertices_b: (M, 3)
@@ -140,6 +151,10 @@ def hausdorff_distance(vertices_a, vertices_b):
     Returns:
         dict: hausdorff, mean_a_to_b, mean_b_to_a, mean_symmetric
     """
+    # GPU fast path
+    if _gpu_ok():
+        return _hausdorff_gpu(vertices_a, vertices_b)
+
     a = np.asarray(vertices_a, dtype=np.float64)
     b = np.asarray(vertices_b, dtype=np.float64)
 
@@ -180,7 +195,7 @@ def normal_deviation_map(cad_vertices, cad_faces, mesh_vertices, mesh_faces):
     cad_n = _compute_vertex_normals(cad_v, np.asarray(cad_faces))
     mesh_n = _compute_vertex_normals(mesh_v, np.asarray(mesh_faces))
 
-    tree = KDTree(mesh_v)
+    tree = _AKDTree(mesh_v)
     _, idx = tree.query(cad_v)
     angles = _angle_between(cad_n, mesh_n[idx])
     angles_deg = np.degrees(angles)
@@ -217,7 +232,7 @@ def curvature_deviation_map(cad_vertices, cad_faces, mesh_vertices, mesh_faces):
     cad_curv = _vertex_curvature(cad_v, cad_f)
     mesh_curv = _vertex_curvature(mesh_v, mesh_f)
 
-    tree = KDTree(mesh_v)
+    tree = _AKDTree(mesh_v)
     _, idx = tree.query(cad_v)
     dev = cad_curv - mesh_curv[idx]
 
@@ -273,7 +288,7 @@ def laplacian_smooth_toward(cad_vertices, cad_faces, target_vertices,
     faces = np.asarray(cad_faces)
     target = np.asarray(target_vertices, dtype=np.float64)
     adj = _vertex_adjacency(faces, len(verts))
-    tree = KDTree(target)
+    tree = _AKDTree(target)
 
     for _ in range(iterations):
         new_verts = verts.copy()
@@ -319,7 +334,7 @@ def project_vertices_to_mesh(cad_vertices, mesh_vertices, mesh_faces,
     mesh_f = np.asarray(mesh_faces)
 
     # Use KDTree on mesh verts for initial nearest vertex
-    tree = KDTree(mesh_v)
+    tree = _AKDTree(mesh_v)
     _, nearest_vi = tree.query(cad_v)
 
     # Build vertex → face map
@@ -497,7 +512,7 @@ def feature_edge_transfer(cad_vertices, cad_faces, mesh_vertices, mesh_faces,
         return cad_v, 0
 
     sharp_pts = np.array(sharp_edge_midpoints)
-    tree = KDTree(sharp_pts)
+    tree = _AKDTree(sharp_pts)
 
     # For each CAD vertex near a sharp edge, pull toward it
     dists, idx = tree.query(cad_v)
@@ -539,7 +554,7 @@ def vertex_normal_realign(cad_vertices, cad_faces, mesh_vertices, mesh_faces,
     cad_n = _compute_vertex_normals(cad_v, np.asarray(cad_faces))
     mesh_n = _compute_vertex_normals(mesh_v, np.asarray(mesh_faces))
 
-    tree = KDTree(mesh_v)
+    tree = _AKDTree(mesh_v)
     dists, idx = tree.query(cad_v)
     target_n = mesh_n[idx]
 
@@ -948,7 +963,7 @@ def centroid_drift(cad_v, mesh_v, n_regions=10):
 
 def median_surface_distance(cad_v, mesh_v):
     """Median nearest-neighbor distance (robust to outliers)."""
-    tree = KDTree(np.asarray(mesh_v))
+    tree = _AKDTree(np.asarray(mesh_v))
     dists, _ = tree.query(np.asarray(cad_v))
     return float(np.median(dists))
 
@@ -958,7 +973,7 @@ def local_roughness_diff(cad_v, cad_f, mesh_v, mesh_f, n_samples=200):
     cad_v, mesh_v = np.asarray(cad_v), np.asarray(mesh_v)
 
     def _local_roughness(v, k=6):
-        tree = KDTree(v)
+        tree = _AKDTree(v)
         dists, _ = tree.query(v, k=min(k + 1, len(v)))
         return np.std(dists[:, 1:], axis=1).mean()
 
@@ -989,7 +1004,7 @@ def volume_diff(cad_v, cad_f, mesh_v, mesh_f):
 
 def percentile_95_distance(cad_v, mesh_v):
     """95th percentile of NN distances (captures widespread offset)."""
-    tree = KDTree(np.asarray(mesh_v))
+    tree = _AKDTree(np.asarray(mesh_v))
     dists, _ = tree.query(np.asarray(cad_v))
     return float(np.percentile(dists, 95))
 
@@ -1032,7 +1047,7 @@ def multi_scale_distance(cad_v, mesh_v, scales=(1.0, 0.5, 0.25)):
         n_mesh = max(10, int(len(mesh_v) * s))
         idx_c = np.random.RandomState(42).choice(len(cad_v), n_cad, replace=False)
         idx_m = np.random.RandomState(42).choice(len(mesh_v), n_mesh, replace=False)
-        tree = KDTree(mesh_v[idx_m])
+        tree = _AKDTree(mesh_v[idx_m])
         dists, _ = tree.query(cad_v[idx_c])
         total += np.mean(dists)
     return float(total / len(scales))
@@ -1117,7 +1132,7 @@ def fix_silhouette_mismatch(cad_v, cad_f, mesh_v, mesh_f):
 
 def fix_hausdorff_outliers(cad_v, cad_f, mesh_v, mesh_f):
     """Pull worst-case outlier vertices toward mesh."""
-    tree = KDTree(np.asarray(mesh_v))
+    tree = _AKDTree(np.asarray(mesh_v))
     dists, idx = tree.query(np.asarray(cad_v))
     threshold = np.percentile(dists, 95)
     v = np.asarray(cad_v, dtype=np.float64).copy()
@@ -1195,7 +1210,7 @@ def fix_region_area(cad_v, cad_f, mesh_v, mesh_f):
 def fix_vertex_density(cad_v, cad_f, mesh_v, mesh_f):
     """Re-distribute vertices toward mesh density via multi-NN blending."""
     mv = np.asarray(mesh_v)
-    tree = KDTree(mv)
+    tree = _AKDTree(mv)
     v = np.asarray(cad_v, dtype=np.float64).copy()
     k = min(5, len(mv))
     dists, idx = tree.query(v, k=k)
@@ -1212,7 +1227,7 @@ def fix_edge_length_distribution(cad_v, cad_f, mesh_v, mesh_f):
     f = np.asarray(cad_f)
     mv = np.asarray(mesh_v)
 
-    tree = KDTree(mv)
+    tree = _AKDTree(mv)
     dists, idx = tree.query(v)
     v = v * 0.65 + mv[idx] * 0.35
     v = laplacian_smooth_toward(v, f, mv, iterations=3, lam=0.3, target_weight=0.25)
@@ -1255,7 +1270,7 @@ def fix_worst_angle_silhouette(cad_v, cad_f, mesh_v, mesh_f):
 
 def fix_median_surface_distance(cad_v, cad_f, mesh_v, mesh_f):
     """Iterative NN pull: pull all vertices toward mesh NN."""
-    tree = KDTree(np.asarray(mesh_v))
+    tree = _AKDTree(np.asarray(mesh_v))
     v = np.asarray(cad_v, dtype=np.float64).copy()
     for _ in range(3):
         dists, idx = tree.query(v)
@@ -1266,7 +1281,7 @@ def fix_median_surface_distance(cad_v, cad_f, mesh_v, mesh_f):
 
 def fix_local_roughness(cad_v, cad_f, mesh_v, mesh_f):
     """Adapt local spacing to match mesh roughness via NN averaging."""
-    tree = KDTree(np.asarray(mesh_v))
+    tree = _AKDTree(np.asarray(mesh_v))
     v = np.asarray(cad_v, dtype=np.float64).copy()
     dists, idx = tree.query(v, k=min(4, len(mesh_v)))
     weights = 1.0 / (dists + 1e-6)
@@ -1294,7 +1309,7 @@ def fix_volume(cad_v, cad_f, mesh_v, mesh_f):
 
 def fix_percentile_95(cad_v, cad_f, mesh_v, mesh_f):
     """Aggressively pull the worst 5% of vertices."""
-    tree = KDTree(np.asarray(mesh_v))
+    tree = _AKDTree(np.asarray(mesh_v))
     dists, idx = tree.query(np.asarray(cad_v))
     threshold = np.percentile(dists, 90)
     v = np.asarray(cad_v, dtype=np.float64).copy()
@@ -1312,7 +1327,7 @@ def fix_multi_scale_distance(cad_v, cad_f, mesh_v, mesh_f):
     """Progressive NN pull at coarse then fine scale."""
     v = np.asarray(cad_v, dtype=np.float64).copy()
     mv = np.asarray(mesh_v)
-    tree = KDTree(mv)
+    tree = _AKDTree(mv)
     dists, idx = tree.query(v)
     v = v * 0.5 + mv[idx] * 0.5
     v = laplacian_smooth_toward(v, cad_f, mv, iterations=2,
@@ -1324,7 +1339,7 @@ def fix_shape_diameter(cad_v, cad_f, mesh_v, mesh_f):
     """Adjust thickness by scaling along vertex normals."""
     v = np.asarray(cad_v, dtype=np.float64).copy()
     normals = _compute_vertex_normals(v, np.asarray(cad_f))
-    tree = KDTree(np.asarray(mesh_v))
+    tree = _AKDTree(np.asarray(mesh_v))
     dists, idx = tree.query(v)
     targets = np.asarray(mesh_v)[idx]
     disp = targets - v
@@ -1489,7 +1504,7 @@ def laplacian_spectrum_diff(cad_v, cad_f, mesh_v, mesh_f, n_eigenvalues=10):
         if n > 500:
             indices = np.random.RandomState(42).choice(n, 500, replace=False)
             v_sub = v[indices]
-            tree = KDTree(v_sub)
+            tree = _AKDTree(v_sub)
             L = np.zeros((500, 500))
             for i in range(500):
                 dists, nbrs = tree.query(v_sub[i], k=min(7, 500))
@@ -1549,7 +1564,7 @@ def vertex_normal_divergence(cad_v, cad_f, mesh_v, mesh_f, n_samples=300):
     cn = _compute_vertex_normals(cad_v, cad_f)
     mn = _compute_vertex_normals(mesh_v, mesh_f)
 
-    tree = KDTree(mesh_v)
+    tree = _AKDTree(mesh_v)
     indices = np.random.RandomState(42).choice(
         len(cad_v), min(n_samples, len(cad_v)), replace=False)
     _, nbr_idx = tree.query(cad_v[indices])
@@ -1647,7 +1662,7 @@ def fix_convexity_defect(cad_v, cad_f, mesh_v, mesh_f):
     from scipy.spatial import ConvexHull
     v = np.asarray(cad_v, dtype=np.float64).copy()
     mv = np.asarray(mesh_v)
-    tree = KDTree(mv)
+    tree = _AKDTree(mv)
     dists, idx = tree.query(v)
     # Blend toward nearest mesh vertex
     v = v * 0.7 + mv[idx] * 0.3
@@ -1677,7 +1692,7 @@ def fix_boundary_edges(cad_v, cad_f, mesh_v, mesh_f):
         return v
 
     bv_idx = np.array(sorted(boundary_verts))
-    tree = KDTree(mv)
+    tree = _AKDTree(mv)
     _, nn_idx = tree.query(v[bv_idx])
     v[bv_idx] = v[bv_idx] * 0.4 + mv[nn_idx] * 0.6
     return v
@@ -1692,7 +1707,7 @@ def fix_principal_curvature(cad_v, cad_f, mesh_v, mesh_f):
     max_curv = max(curv.max(), 1e-12)
     weights = curv / max_curv  # High-curvature vertices get more correction
 
-    tree = KDTree(mv)
+    tree = _AKDTree(mv)
     _, idx = tree.query(v)
     blend = 0.3 * weights[:, None]
     v = v * (1 - blend) + mv[idx] * blend
@@ -1753,7 +1768,7 @@ def fix_face_area_variance(cad_v, cad_f, mesh_v, mesh_f):
         v = new_v
 
     # Pull back toward mesh
-    tree = KDTree(np.asarray(mesh_v))
+    tree = _AKDTree(np.asarray(mesh_v))
     _, idx = tree.query(v)
     v = v * 0.6 + np.asarray(mesh_v)[idx] * 0.4
     return v
@@ -1769,7 +1784,7 @@ def fix_vertex_normal_divergence(cad_v, cad_f, mesh_v, mesh_f):
     cn = _compute_vertex_normals(v, f)
     mn = _compute_vertex_normals(mv, mf)
 
-    tree = KDTree(mv)
+    tree = _AKDTree(mv)
     _, idx = tree.query(v)
     target_normals = mn[idx]
 
@@ -1841,7 +1856,7 @@ def fix_aspect_ratio(cad_v, cad_f, mesh_v, mesh_f):
             new_v[i] = v[i] * 0.75 + nbr_center * 0.25
         v = new_v
 
-    tree = KDTree(mv)
+    tree = _AKDTree(mv)
     _, idx = tree.query(v)
     v = v * 0.5 + mv[idx] * 0.5
     return v

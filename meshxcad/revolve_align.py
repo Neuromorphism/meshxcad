@@ -29,6 +29,7 @@ around the Z axis.  Given such a profile and a target mesh, these tools:
 import math
 import numpy as np
 from scipy.spatial import KDTree
+from .gpu import AcceleratedKDTree as _AKDTree
 from scipy.interpolate import CubicSpline
 
 

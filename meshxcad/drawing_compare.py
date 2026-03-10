@@ -6,6 +6,7 @@ gives robustness to line-weight variation and anti-aliasing.
 
 import numpy as np
 from scipy.spatial import KDTree
+from .gpu import AcceleratedKDTree as _AKDTree
 
 
 def extract_edge_pixels(image, threshold=128) -> np.ndarray:
@@ -36,8 +37,8 @@ def chamfer_distance_2d(points_a: np.ndarray, points_b: np.ndarray) -> float:
         return 0.0
     if len(points_a) == 0 or len(points_b) == 0:
         return float("inf")
-    tree_a = KDTree(points_a)
-    tree_b = KDTree(points_b)
+    tree_a = _AKDTree(points_a)
+    tree_b = _AKDTree(points_b)
     dist_a_to_b, _ = tree_b.query(points_a)
     dist_b_to_a, _ = tree_a.query(points_b)
     return float(0.5 * np.mean(dist_a_to_b) + 0.5 * np.mean(dist_b_to_a))
@@ -79,11 +80,11 @@ def compare_drawings(drawing_a: np.ndarray, drawing_b: np.ndarray,
     # Precision / recall with tolerance (within 3 pixels)
     tolerance = 3.0
     if len(edges_a) > 0 and len(edges_b) > 0:
-        tree_b = KDTree(edges_b)
+        tree_b = _AKDTree(edges_b)
         dist_a, _ = tree_b.query(edges_a)
         precision = float(np.mean(dist_a <= tolerance))
 
-        tree_a = KDTree(edges_a)
+        tree_a = _AKDTree(edges_a)
         dist_b, _ = tree_a.query(edges_b)
         recall = float(np.mean(dist_b <= tolerance))
     elif len(edges_a) == 0 and len(edges_b) == 0:
