@@ -6,54 +6,70 @@
         "enabled": true,
         "params": {
           "center": [
-            -0.15882783374001647,
-            -0.6313032416441047,
+            -0.6351919188793165,
+            -0.6376800420647522,
             10.310478619364066
           ],
           "axis": [
-            -0.5276363143329696,
-            -0.4749708468536403,
+            -0.5862625714810774,
+            -0.4797685321753943,
             0.6527774144489543
           ],
-          "radius": 2.579275895184761,
-          "height": 12.052379117306076
+          "radius": 2.8658621057608453,
+          "height": 16.73941544070288
         }
       },
       {
-        "op_type": "box",
+        "op_type": "cylinder",
         "enabled": true,
         "params": {
           "center": [
-            -5.116625981953147,
-            1.7323053626452236,
-            9.676812935097502
+            6.628197161941233e-18,
+            -6.296787303844176e-17,
+            5.5
           ],
-          "dimensions": [
-            0.8074338184132784,
-            1.6288410004474745,
-            0.5539861451540882
-          ]
+          "axis": [
+            0.0,
+            -2.7755575615628914e-17,
+            1.0000000000000002
+          ],
+          "radius": 0.6375,
+          "height": 11.000000000000002
+        }
+      },
+      {
+        "op_type": "torus",
+        "enabled": true,
+        "params": {
+          "center": [
+            -0.8748748288950879,
+            -2.9728944722042643,
+            13.28662873885284
+          ],
+          "major_r": 2.6468790188641758,
+          "minor_r": 0.9856046915234953
         }
       }
     ],
-    "n_ops": 2,
-    "complexity": 2.0
+    "n_ops": 3,
+    "complexity": 3.5
   },
   "initial": {
-    "elegance": 0.9237,
+    "elegance": 0.8897,
     "accuracy": 0.8684,
     "cad_score": 0.5111,
     "n_ops": 1,
     "program": "1 ops: cylinder"
   },
   "final": {
-    "elegance": 0.8967,
-    "accuracy": 0.905,
-    "cad_score": 0.4095,
-    "n_ops": 2,
-    "program_summary": "2 ops: cylinder \u2192 box"
+    "elegance": 0.8642,
+    "accuracy": 0.9116,
+    "cad_score": 0.3712,
+    "n_ops": 3,
+    "program_summary": "3 ops: cylinder \u2192 cylinder \u2192 torus"
   },
+  "feature_fidelity": 0.923,
   "converged": true,
   "total_sweeps": 4,
-  "elapsed_sec": 15.8
+  "elapsed_sec": 16.7
 }

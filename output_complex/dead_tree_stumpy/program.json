@@ -6,32 +6,87 @@
         "enabled": true,
         "params": {
           "center": [
-            0.1555511747493862,
-            0.059588582089510164,
+            0.10877704527929105,
+            0.054171438263191055,
             3.5421991302763005
           ],
-          "radius": 1.2459957587932864
+          "radius": 1.3844397319925403
+        }
+      },
+      {
+        "op_type": "cylinder",
+        "enabled": true,
+        "params": {
+          "center": [
+            0.7801250162368027,
+            -0.9230143045087785,
+            5.25788210014127
+          ],
+          "axis": [
+            0.5749584112403545,
+            -0.6350828050136109,
+            0.51584169676366
+          ],
+          "radius": 0.06475114198867288,
+          "height": 0.5177805995648451
+        }
+      },
+      {
+        "op_type": "cylinder",
+        "enabled": true,
+        "params": {
+          "center": [
+            1.6773105628924632,
+            -0.38942848496679716,
+            2.7750318306621846
+          ],
+          "axis": [
+            0.6505670854887486,
+            -0.6490457117348799,
+            0.3607525832401558
+          ],
+          "radius": 0.06477759637136248,
+          "height": 0.6410050832249368
+        }
+      },
+      {
+        "op_type": "cylinder",
+        "enabled": true,
+        "params": {
+          "center": [
+            -0.5131378010670397,
+            0.5608990255682522,
+            3.587632027107772
+          ],
+          "axis": [
+            -0.5453440448151764,
+            0.7383747936479195,
+            0.45181753543174585
+          ],
+          "radius": 0.024621230624838734,
+          "height": 1.0521519153224559
         }
       }
     ],
-    "n_ops": 1,
-    "complexity": 1.0
+    "n_ops": 4,
+    "complexity": 4.0
   },
   "initial": {
-    "elegance": 0.8963,
+    "elegance": 0.8584,
     "accuracy": 0.8544,
     "cad_score": 0.523,
     "n_ops": 1,
     "program": "1 ops: sphere"
   },
   "final": {
-    "elegance": 0.8974,
-    "accuracy": 0.8597,
-    "cad_score": 0.523,
-    "n_ops": 1,
-    "program_summary": "1 ops: sphere"
+    "elegance": 0.7716,
+    "accuracy": 0.9017,
+    "cad_score": 0.355,
+    "n_ops": 4,
+    "program_summary": "4 ops: sphere \u2192 cylinder \u2192 cylinder \u2192 cylinder"
   },
+  "feature_fidelity": 0.6982,
   "converged": true,
   "total_sweeps": 4,
-  "elapsed_sec": 2.2
+  "elapsed_sec": 9.9
 }

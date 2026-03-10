@@ -18,26 +18,81 @@
           "radius": 0.1,
           "height": 0.9701525432638164
         }
+      },
+      {
+        "op_type": "cylinder",
+        "enabled": true,
+        "params": {
+          "center": [
+            0.17500000000000002,
+            8.437300824796855e-19,
+            0.075
+          ],
+          "axis": [
+            0.7071067811865474,
+            0.0,
+            0.7071067811865478
+          ],
+          "radius": 0.026362499999999997,
+          "height": 0.21213203435596428
+        }
+      },
+      {
+        "op_type": "cylinder",
+        "enabled": true,
+        "params": {
+          "center": [
+            9.92278051824895e-18,
+            0.17500000000000002,
+            0.075
+          ],
+          "axis": [
+            4.641492198510735e-17,
+            0.7071067811865478,
+            0.7071067811865476
+          ],
+          "radius": 0.026362499999999997,
+          "height": 0.2121320343559643
+        }
+      },
+      {
+        "op_type": "cylinder",
+        "enabled": true,
+        "params": {
+          "center": [
+            -0.175,
+            2.1004695387337e-17,
+            0.075
+          ],
+          "axis": [
+            -0.7071067811865475,
+            2.220446049250313e-16,
+            0.7071067811865477
+          ],
+          "radius": 0.026362499999999997,
+          "height": 0.21213203435596428
+        }
       }
     ],
-    "n_ops": 1,
-    "complexity": 1.0
+    "n_ops": 4,
+    "complexity": 4.0
   },
   "initial": {
-    "elegance": 0.9137,
+    "elegance": 0.8702,
     "accuracy": 0.8986,
     "cad_score": 0.5251,
     "n_ops": 1,
     "program": "1 ops: cylinder"
   },
   "final": {
-    "elegance": 0.9156,
-    "accuracy": 0.9082,
-    "cad_score": 0.5299,
-    "n_ops": 1,
-    "program_summary": "1 ops: cylinder"
+    "elegance": 0.7979,
+    "accuracy": 0.943,
+    "cad_score": 0.3586,
+    "n_ops": 4,
+    "program_summary": "4 ops: cylinder \u2192 cylinder \u2192 cylinder \u2192 cylinder"
   },
+  "feature_fidelity": 0.8534,
   "converged": true,
   "total_sweeps": 4,
-  "elapsed_sec": 1.0
+  "elapsed_sec": 7.5
 }

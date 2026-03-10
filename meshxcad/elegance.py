@@ -465,6 +465,142 @@ def score_watertightness(program):
     return boundary_score * 0.4 + manifold_score * 0.3 + euler_score * 0.3
 
 
+# ============================================================================
+# Feature fidelity — medium-small feature preservation
+# ============================================================================
+
+def _decompose_features(vertices, faces):
+    """Decompose a mesh into connected components and classify by size.
+
+    Returns list of dicts sorted by vertex count descending:
+        [{label, verts_idx, center, radius, frac, size_class}, ...]
+
+    size_class: 'large' (>15%), 'medium' (2-15%), 'small' (0.5-2%), 'tiny' (<0.5%)
+    """
+    from scipy.sparse import csr_matrix
+    from scipy.sparse.csgraph import connected_components
+
+    n = len(vertices)
+    if n == 0:
+        return []
+
+    rows = np.concatenate([faces[:, 0], faces[:, 1], faces[:, 2]])
+    cols = np.concatenate([faces[:, 1], faces[:, 2], faces[:, 0]])
+    data = np.ones(len(rows))
+    adj = csr_matrix((data, (rows, cols)), shape=(n, n))
+    n_comp, labels = connected_components(adj, directed=False)
+
+    # Adaptive large-feature threshold: for meshes with few components,
+    # only the single largest (if it dominates) should be "large".
+    # This ensures chair legs, rocket fins, etc. are treated as medium.
+    if n_comp <= 3:
+        large_thresh = 0.50
+    elif n_comp <= 8:
+        large_thresh = 0.30
+    else:
+        large_thresh = 0.15
+
+    features = []
+    for c in range(n_comp):
+        mask = labels == c
+        idx = np.where(mask)[0]
+        pts = vertices[idx]
+        center = pts.mean(axis=0)
+        radius = float(np.max(np.linalg.norm(pts - center, axis=1)))
+        frac = len(idx) / n
+
+        if frac > large_thresh:
+            size_class = "large"
+        elif frac > 0.02:
+            size_class = "medium"
+        elif frac > 0.005:
+            size_class = "small"
+        else:
+            size_class = "tiny"
+
+        features.append({
+            "label": c,
+            "verts_idx": idx,
+            "center": center,
+            "radius": radius,
+            "frac": frac,
+            "size_class": size_class,
+        })
+
+    features.sort(key=lambda f: len(f["verts_idx"]), reverse=True)
+    return features
+
+
+def score_feature_fidelity(program, target_v, target_f):
+    """Score how well the CAD output preserves medium-small features.
+
+    Focuses on features that are 0.5%-15% of the total mesh — the scale
+    of fingers, individual branches, chair legs, rocket fins, etc.
+
+    Measures two things per feature:
+      1. Coverage: fraction of feature vertices within a tight distance
+         threshold of the CAD output
+      2. Spatial presence: whether the CAD output has geometry near the
+         feature's centroid at all
+
+    Returns:
+        float: 0.0 (no features preserved) to 1.0 (all features well-covered)
+    """
+    cad_v, cad_f = program.evaluate()
+    if len(cad_v) == 0:
+        return 0.0
+
+    target_v = np.asarray(target_v, dtype=np.float64)
+    target_f = np.asarray(target_f)
+
+    features = _decompose_features(target_v, target_f)
+
+    # Filter to medium and small features only
+    ms_features = [f for f in features if f["size_class"] in ("medium", "small")]
+    if not ms_features:
+        # No medium-small features to evaluate — return neutral score
+        return 0.8
+
+    bbox_diag = float(np.linalg.norm(target_v.max(0) - target_v.min(0)))
+    if bbox_diag < 1e-12:
+        return 0.0
+
+    # Tight coverage threshold: 5% of bounding box diagonal
+    coverage_thresh = bbox_diag * 0.05
+
+    cad_tree = KDTree(cad_v)
+
+    weighted_score = 0.0
+    total_weight = 0.0
+
+    for feat in ms_features:
+        feat_pts = target_v[feat["verts_idx"]]
+
+        # Weight: medium features count 3x, small features count 1x
+        w = 3.0 if feat["size_class"] == "medium" else 1.0
+
+        # 1. Coverage: what fraction of feature vertices are close to CAD?
+        dists, _ = cad_tree.query(feat_pts)
+        coverage = float(np.mean(dists < coverage_thresh))
+
+        # 2. Spatial presence: is there CAD geometry near the feature center?
+        center_dist, _ = cad_tree.query(feat["center"].reshape(1, 3))
+        # Presence decays: if CAD is within the feature's own radius, full credit
+        presence_thresh = max(feat["radius"] * 1.5, coverage_thresh)
+        presence = float(math.exp(-center_dist[0] / presence_thresh))
+
+        # Combined per-feature score
+        feat_score = coverage * 0.7 + presence * 0.3
+
+        weighted_score += w * feat_score
+        total_weight += w
+
+    if total_weight < 1e-12:
+        return 0.8
+
+    return float(weighted_score / total_weight)
+
+
 def score_accuracy(program, target_v, target_f):
     """Score how well the program's mesh matches the target.
 
@@ -497,18 +633,19 @@ def score_accuracy(program, target_v, target_f):
 
 # Weights from academic rubrics (Company et al. 2015, adapted)
 ELEGANCE_WEIGHTS = {
-    "accuracy":            0.20,  # completeness: does it match the target?
-    "conciseness":         0.12,  # fewer ops = more elegant
-    "op_hierarchy":        0.08,  # prefer primitives over booleans
-    "symmetry":            0.08,  # exploit symmetry
-    "no_redundancy":       0.10,  # every op contributes
+    "accuracy":            0.18,  # completeness: does it match the target?
+    "feature_fidelity":    0.10,  # medium-small feature preservation
+    "conciseness":         0.11,  # fewer ops = more elegant
+    "op_hierarchy":        0.07,  # prefer primitives over booleans
+    "symmetry":            0.07,  # exploit symmetry
+    "no_redundancy":       0.09,  # every op contributes
     "tree_depth":          0.06,  # shallow dependency chains
     "param_economy":       0.05,  # economical parameter usage
     "origin_anchoring":    0.04,  # anchored to origin
-    "mesh_quality":        0.08,  # good triangle quality
-    "normal_consistency":  0.05,  # consistent normals
-    "op_diversity":        0.06,  # varied but not repetitive ops
-    "watertightness":      0.08,  # closed manifold output
+    "mesh_quality":        0.07,  # good triangle quality
+    "normal_consistency":  0.04,  # consistent normals
+    "op_diversity":        0.05,  # varied but not repetitive ops
+    "watertightness":      0.07,  # closed manifold output
 }
 
 
@@ -524,6 +661,7 @@ def compute_elegance_score(program, target_v, target_f):
 
     scores = {
         "accuracy":           score_accuracy(program, target_v, target_f),
+        "feature_fidelity":   score_feature_fidelity(program, target_v, target_f),
         "conciseness":        score_conciseness(program),
         "op_hierarchy":       score_op_hierarchy(program),
         "symmetry":           score_symmetry_exploitation(program, target_v),
@@ -967,6 +1105,13 @@ def _generate_anti_cad_mutations(program, features, target_v, target_f):
             _try_subtract_mutations(
                 program, cad_v, target_v, target_f, mutations)
 
+    # Strategy 8: Feature-targeted fill (same as elegance strategy 14,
+    # also in the discriminator loop so it gets tried in both passes)
+    if program.n_enabled() < 6:
+        _try_feature_targeted_fill(
+            program, target_v, target_f, mutations,
+            np.random.RandomState(42))
+
     return mutations
 
 
@@ -1186,6 +1331,12 @@ def _mutate_for_elegance(program, target_v, target_f, rng):
     if acc < 0.7 and program.n_enabled() == 1:
         _try_scaled_copy(program, target_v, target_f, mutations, rng)
 
+    # Strategy 14: Feature-targeted fill — find the worst-covered
+    # medium/small feature and add a primitive fitted to its vertices
+    if program.n_enabled() < 6:
+        _try_feature_targeted_fill(
+            program, target_v, target_f, mutations, rng)
+
     return mutations
 
 
@@ -1297,6 +1448,139 @@ def _try_scaled_copy(program, target_v, target_f, mutations, rng):
     refine_operation(p, len(p.operations) - 1,
                      target_v, target_f, max_iter=15)
     mutations.append(("add_scaled_copy", p))
+
+
+def _try_feature_targeted_fill(program, target_v, target_f, mutations, rng):
+    """Find worst-covered medium/small features and add primitives for them.
+
+    Unlike gap-filling (which uses distance percentiles), this directly
+    decomposes the target into connected components, measures per-feature
+    coverage, and adds a primitive fitted to the worst-covered feature's
+    own vertices.
+    """
+    cad_v, cad_f = program.evaluate()
+    if len(cad_v) == 0:
+        return
+
+    target_v = np.asarray(target_v, dtype=np.float64)
+    features = _decompose_features(target_v, target_f)
+
+    ms_features = [f for f in features if f["size_class"] in ("medium", "small")]
+    if not ms_features:
+        return
+
+    bbox_diag = float(np.linalg.norm(target_v.max(0) - target_v.min(0)))
+    coverage_thresh = bbox_diag * 0.05
+
+    cad_tree = KDTree(cad_v)
+
+    # Score each feature by coverage
+    scored = []
+    for feat in ms_features:
+        feat_pts = target_v[feat["verts_idx"]]
+        dists, _ = cad_tree.query(feat_pts)
+        coverage = float(np.mean(dists < coverage_thresh))
+        scored.append((coverage, feat))
+
+    scored.sort(key=lambda x: x[0])
+
+    # Try adding a primitive for the worst-covered features (up to 2)
+    from .reconstruct import fit_sphere, fit_cylinder, fit_box
+    for coverage, feat in scored[:2]:
+        if coverage > 0.7:
+            break  # already well-covered
+
+        feat_pts = target_v[feat["verts_idx"]]
+        center = feat["center"]
+        radius = feat["radius"]
+
+        if len(feat_pts) < 4:
+            continue
+
+        # Try sphere and cylinder, pick whichever fits better
+        best_op = None
+        best_residual = float("inf")
+
+        try:
+            sp = fit_sphere(feat_pts)
+            if sp["residual"] < best_residual:
+                best_residual = sp["residual"]
+                best_op = CadOp("sphere", {
+                    "center": sp["center"].tolist(),
+                    "radius": sp["radius"],
+                })
+        except Exception:
+            pass
+
+        try:
+            cy = fit_cylinder(feat_pts)
+            if cy["residual"] < best_residual:
+                best_residual = cy["residual"]
+                best_op = CadOp("cylinder", {
+                    "center": cy["center"].tolist(),
+                    "axis": cy["axis"].tolist(),
+                    "radius": cy["radius"],
+                    "height": cy["height"],
+                })
+        except Exception:
+            pass
+
+        try:
+            bx = fit_box(feat_pts)
+            if bx["residual"] < best_residual:
+                best_residual = bx["residual"]
+                best_op = CadOp("box", {
+                    "center": bx["center"].tolist(),
+                    "dimensions": bx["dimensions"].tolist(),
+                })
+        except Exception:
+            pass
+
+        if best_op is None:
+            continue
+
+        p = program.copy()
+        p.operations.append(best_op)
+        p.invalidate_cache()
+        refine_operation(p, len(p.operations) - 1,
+                         target_v, target_f, max_iter=30)
+        mutations.append(("feature_fill", p))
+
+    # Also try a multi-feature fill: add primitives for the 2-3 worst
+    # features at once (amortizes the conciseness penalty across more
+    # feature coverage)
+    worst = [(cov, feat) for cov, feat in scored if cov < 0.7]
+    if len(worst) >= 2 and program.n_enabled() < 4:
+        p = program.copy()
+        added = 0
+        for _, feat in worst[:3]:
+            feat_pts = target_v[feat["verts_idx"]]
+            if len(feat_pts) < 4:
+                continue
+            try:
+                cy = fit_cylinder(feat_pts)
+                op = CadOp("cylinder", {
+                    "center": cy["center"].tolist(),
+                    "axis": cy["axis"].tolist(),
+                    "radius": cy["radius"],
+                    "height": cy["height"],
+                })
+            except Exception:
+                try:
+                    sp = fit_sphere(feat_pts)
+                    op = CadOp("sphere", {
+                        "center": sp["center"].tolist(),
+                        "radius": sp["radius"],
+                    })
+                except Exception:
+                    continue
+            p.operations.append(op)
+            added += 1
+        if added >= 2:
+            p.invalidate_cache()
+            for j in range(len(p.operations) - added, len(p.operations)):
+                refine_operation(p, j, target_v, target_f, max_iter=15)
+            mutations.append(("multi_feature_fill", p))
 
 
 def run_elegance_tournament(target_v, target_f, max_rounds=30, n_contestants=4):

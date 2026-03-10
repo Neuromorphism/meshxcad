@@ -30,26 +30,45 @@
           "radius": 0.8408559785681793,
           "height": 8.194569428521419
         }
+      },
+      {
+        "op_type": "cylinder",
+        "enabled": true,
+        "params": {
+          "center": [
+            2.8064564664607863,
+            0.09674507561905278,
+            6.162727087578144
+          ],
+          "axis": [
+            -0.9830743526649776,
+            -0.10118413255218558,
+            -0.446188115006447
+          ],
+          "radius": 1.2230435547989043,
+          "height": 7.306840288475174
+        }
       }
     ],
-    "n_ops": 2,
-    "complexity": 2.0
+    "n_ops": 3,
+    "complexity": 3.0
   },
   "initial": {
-    "elegance": 0.9111,
+    "elegance": 0.8712,
     "accuracy": 0.8484,
     "cad_score": 0.523,
     "n_ops": 1,
     "program": "1 ops: sphere"
   },
   "final": {
-    "elegance": 0.8898,
-    "accuracy": 0.8875,
-    "cad_score": 0.4316,
-    "n_ops": 2,
-    "program_summary": "2 ops: sphere \u2192 cylinder"
+    "elegance": 0.8605,
+    "accuracy": 0.8998,
+    "cad_score": 0.4209,
+    "n_ops": 3,
+    "program_summary": "3 ops: sphere \u2192 cylinder \u2192 cylinder"
   },
+  "feature_fidelity": 0.7334,
   "converged": true,
-  "total_sweeps": 4,
-  "elapsed_sec": 11.6
+  "total_sweeps": 5,
+  "elapsed_sec": 36.0
 }
