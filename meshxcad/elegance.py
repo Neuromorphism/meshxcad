@@ -1315,7 +1315,7 @@ def _mutate_for_elegance(program, target_v, target_f, rng):
     mutations.append(("perturb_params", p))
 
     # Strategy 7: Add an operation to fill gaps (if accuracy is low)
-    if acc < 0.7:
+    if acc < 0.95 and program.n_enabled() < 8:
         gaps = find_program_gaps(program, target_v, target_f, max_gaps=1)
         if gaps:
             p = program.copy()
@@ -1380,6 +1380,16 @@ def _mutate_for_elegance(program, target_v, target_f, rng):
             if changed:
                 p.invalidate_cache()
                 mutations.append((f"batch_hdivs_{trial_hdivs}", p))
+
+    # Strategy 12b2: Intensive refinement of single-op programs
+    # For single-revolve or single-profiled_cylinder programs, try re-fitting
+    if program.n_enabled() <= 2:
+        for i, op in enumerate(program.operations):
+            if op.enabled and op.op_type in ("revolve", "profiled_cylinder"):
+                p = program.copy()
+                refine_operation(p, i, target_v, target_f, max_iter=30)
+                mutations.append(("intensive_refine", p))
+                break
 
     # Strategy 12c: Per-component profiled_cylinder upgrade
     # For programs with cylinder ops, try upgrading each to profiled_cylinder

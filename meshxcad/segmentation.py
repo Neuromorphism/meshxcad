@@ -36,6 +36,7 @@ class MeshSegment:
     quality: float = 0.0
     parent_id: Optional[int] = None
     label: str = ""
+    is_fillet: bool = False    # True if this segment is a blend/fillet region
 
 
 # ---------------------------------------------------------------------------
@@ -861,11 +862,162 @@ def _extract_loft_path_and_profiles(segment):
 
 
 # ---------------------------------------------------------------------------
+# Fillet / blend detection
+# ---------------------------------------------------------------------------
+
+def detect_fillets(vertices, faces, segments):
+    """Detect fillet/blend regions between CAD primitives.
+
+    Fillets are transition surfaces with roughly triangular cross-section
+    extruded along the path where two geometric primitives intersect.
+    They blend the sharp intersection edge into a smooth curve.
+
+    Types of fillets handled:
+    - **Concave fillets**: Fill inner corners (e.g., cylinder meeting a plate).
+      Cross-section is concave-triangular.
+    - **Convex fillets**: Round outer corners (e.g., chamfered cube edges).
+      Cross-section is convex-triangular.
+    - **Variable fillets**: Around curved intersections (e.g., sphere embedded
+      in a cube face).  The fillet curves along the intersection path but may
+      be straight in some sections.
+
+    The detection is two-phase:
+    Phase 1 (curvature): Identify high-curvature band regions (narrow strips
+      of faces with elevated curvature relative to the mesh average).
+    Phase 2 (topology): Verify these bands border two different segments
+      (i.e., they're transitions between primitives, not features of a
+      single primitive like a cone tip).
+
+    Segments marked is_fillet=True should be excluded from primitive fitting
+    because fillet geometry masks the underlying sharp-edge intersection.
+
+    Returns:
+        fillet_face_mask: boolean array (n_faces,) — True for fillet faces
+    """
+    v = np.asarray(vertices, dtype=np.float64)
+    f = np.asarray(faces)
+    n_verts = len(v)
+    n_faces = len(f)
+
+    if n_faces < 10 or n_verts < 10:
+        return np.zeros(n_faces, dtype=bool)
+
+    # Phase 1: Curvature-based fillet candidate detection
+    # Compute per-vertex discrete curvature (angle deficit)
+    angle_sum = np.zeros(n_verts)
+    for tri in f:
+        for k in range(3):
+            i, j, l = int(tri[k]), int(tri[(k + 1) % 3]), int(tri[(k + 2) % 3])
+            v1 = v[j] - v[i]
+            v2 = v[l] - v[i]
+            len1 = np.linalg.norm(v1)
+            len2 = np.linalg.norm(v2)
+            if len1 > 1e-12 and len2 > 1e-12:
+                cos_a = np.clip(np.dot(v1, v2) / (len1 * len2), -1, 1)
+                angle_sum[i] += math.acos(cos_a)
+
+    curvature = np.abs(2 * math.pi - angle_sum)
+
+    if np.max(curvature) < 1e-8:
+        return np.zeros(n_faces, dtype=bool)
+
+    curv_median = np.median(curvature)
+    curv_std = max(np.std(curvature), 1e-8)
+    curv_threshold = curv_median + 1.5 * curv_std
+    high_curv_mask = curvature > curv_threshold
+
+    if high_curv_mask.sum() < 3:
+        return np.zeros(n_faces, dtype=bool)
+
+    # Identify fillet faces: >= 2 of 3 vertices are high-curvature
+    face_curv_count = np.zeros(n_faces, dtype=int)
+    for fi in range(n_faces):
+        for vi in f[fi]:
+            if high_curv_mask[vi]:
+                face_curv_count[fi] += 1
+    fillet_face_mask = face_curv_count >= 2
+
+    # Avoid marking > 30% of faces as fillet
+    if fillet_face_mask.sum() / max(n_faces, 1) > 0.3:
+        curv_threshold = curv_median + 2.5 * curv_std
+        high_curv_mask = curvature > curv_threshold
+        face_curv_count = np.zeros(n_faces, dtype=int)
+        for fi in range(n_faces):
+            for vi in f[fi]:
+                if high_curv_mask[vi]:
+                    face_curv_count[fi] += 1
+        fillet_face_mask = face_curv_count >= 2
+
+    # Phase 2: Topological validation — confirm fillet segments border
+    # multiple other segments (true fillets are transitions between
+    # two distinct primitives)
+    global_tree = KDTree(v)
+
+    for seg in segments:
+        if len(seg.faces) < 3 or len(seg.vertices) < 3:
+            continue
+
+        seg_v = seg.vertices
+        _, nearest = global_tree.query(seg_v)
+        seg_curvatures = curvature[nearest]
+        high_frac = float(np.mean(seg_curvatures > curv_threshold))
+        is_small = len(seg_v) / max(n_verts, 1) < 0.15
+
+        if not (high_frac > 0.4 and is_small):
+            continue
+
+        # Check topology: does this segment border multiple other segments?
+        # A true fillet borders at least 2 other segments.
+        # Use centroid proximity to count neighboring segments.
+        seg_center = seg.centroid
+        neighbor_ids = set()
+        for other in segments:
+            if other.segment_id == seg.segment_id:
+                continue
+            if other.is_fillet:
+                continue
+            dist = float(np.linalg.norm(seg_center - other.centroid))
+            # Also check if any vertices are close
+            if len(other.vertices) > 0:
+                other_tree = KDTree(other.vertices)
+                d, _ = other_tree.query(seg_v)
+                close_count = (d < np.linalg.norm(
+                    v.max(0) - v.min(0)) * 0.05).sum()
+                if close_count > 1:
+                    neighbor_ids.add(other.segment_id)
+
+        # Check aspect ratio: fillets are typically narrow bands
+        centered = seg_v - seg_center
+        if len(centered) >= 3:
+            cov = centered.T @ centered / len(centered)
+            eigvals = np.sort(np.linalg.eigvalsh(cov))[::-1]
+            spreads = np.sqrt(np.maximum(eigvals, 0))
+            # Elongated = high first-to-second spread ratio
+            if spreads[1] > 1e-12:
+                elongation = spreads[0] / spreads[1]
+            else:
+                elongation = 10.0
+        else:
+            elongation = 1.0
+
+        # Mark as fillet if:
+        # - High curvature fraction (>40%)
+        # - Small relative to mesh (<15% of vertices)
+        # - Borders 2+ other segments OR is highly elongated (band-like)
+        if len(neighbor_ids) >= 2 or (elongation > 2.0 and high_frac > 0.5):
+            seg.is_fillet = True
+            seg.cad_action = "fillet"
+            seg.label = f"fillet_{seg.segment_id}"
+
+    return fillet_face_mask
+
+
+# ---------------------------------------------------------------------------
 # Top-level API
 # ---------------------------------------------------------------------------
 
 def segment_mesh(vertices, faces, strategy="auto", template=None,
-                  min_segment_faces=20):
+                  min_segment_faces=20, detect_fillets_flag=True):
     """Segment a mesh into parts suitable for CAD reconstruction.
 
     Args:
@@ -903,6 +1055,10 @@ def segment_mesh(vertices, faces, strategy="auto", template=None,
     # Classify each segment's CAD action
     for seg in segments:
         classify_segment_action(seg)
+
+    # Detect fillets/blends that mask underlying primitive intersections
+    if detect_fillets_flag and len(segments) >= 2:
+        detect_fillets(v, f, segments)
 
     return segments
 

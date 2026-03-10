@@ -63,6 +63,128 @@ GAMMA = 0.001  # per-parameter
 
 
 # ---------------------------------------------------------------------------
+# Mesh complexity and adaptive op budget
+# ---------------------------------------------------------------------------
+
+def mesh_complexity(vertices, faces):
+    """Estimate geometric complexity of a target mesh.
+
+    Returns a dict with:
+        complexity: float 0-1 (0=simple sphere, 1=maximally complex)
+        n_components: connected component count
+        curvature_entropy: entropy of discrete curvature distribution
+        op_budget: recommended maximum operation count
+
+    The complexity drives the op budget: simple shapes get few ops,
+    complex shapes get many.  Principle: as few ops as possible, as many
+    as necessary.
+    """
+    import math as _math
+    vertices = np.asarray(vertices, dtype=np.float64)
+    faces = np.asarray(faces)
+
+    n_verts = len(vertices)
+    n_faces = len(faces)
+
+    # Component count
+    from scipy.sparse import csr_matrix
+    from scipy.sparse.csgraph import connected_components
+    n = len(vertices)
+    if n_faces > 0 and n > 0:
+        rows = np.concatenate([faces[:, 0], faces[:, 1], faces[:, 2]])
+        cols = np.concatenate([faces[:, 1], faces[:, 2], faces[:, 0]])
+        adj = csr_matrix((np.ones(len(rows)), (rows, cols)), shape=(n, n))
+        n_comp, _ = connected_components(adj, directed=False)
+    else:
+        n_comp = 1
+
+    # Curvature entropy
+    curvature_entropy = 0.0
+    if n_verts > 3 and n_faces > 0:
+        try:
+            angle_sum = np.zeros(n_verts)
+            for tri in faces:
+                for k in range(3):
+                    i, j, l = int(tri[k]), int(tri[(k + 1) % 3]), int(tri[(k + 2) % 3])
+                    v1 = vertices[j] - vertices[i]
+                    v2 = vertices[l] - vertices[i]
+                    len1 = np.linalg.norm(v1)
+                    len2 = np.linalg.norm(v2)
+                    if len1 > 1e-12 and len2 > 1e-12:
+                        cos_a = np.clip(np.dot(v1, v2) / (len1 * len2), -1, 1)
+                        angle_sum[i] += _math.acos(cos_a)
+            curvature = 2 * _math.pi - angle_sum
+            n_bins = min(30, max(5, n_verts // 10))
+            hist, _ = np.histogram(curvature, bins=n_bins, density=True)
+            hist = hist[hist > 0]
+            if len(hist) > 0:
+                p = hist / hist.sum()
+                curvature_entropy = float(-np.sum(p * np.log2(p + 1e-12)))
+                max_entropy = _math.log2(n_bins)
+                curvature_entropy = curvature_entropy / max(max_entropy, 1e-8)
+        except Exception:
+            curvature_entropy = 0.5
+
+    # Bounding box aspect spread
+    bbox = vertices.max(0) - vertices.min(0)
+    bbox_sorted = np.sort(bbox)[::-1]
+    if bbox_sorted[0] > 1e-12:
+        ratios = bbox_sorted / bbox_sorted[0]
+        aspect_spread = float(np.std(ratios))
+    else:
+        aspect_spread = 0.0
+
+    # Edge entropy
+    edge_entropy = 0.0
+    if n_faces > 0:
+        try:
+            edges = np.concatenate([
+                np.linalg.norm(vertices[faces[:, 1]] - vertices[faces[:, 0]], axis=1),
+                np.linalg.norm(vertices[faces[:, 2]] - vertices[faces[:, 1]], axis=1),
+                np.linalg.norm(vertices[faces[:, 0]] - vertices[faces[:, 2]], axis=1),
+            ])
+            n_bins = min(20, max(5, len(edges) // 20))
+            hist, _ = np.histogram(edges, bins=n_bins, density=True)
+            hist = hist[hist > 0]
+            if len(hist) > 0:
+                p = hist / hist.sum()
+                edge_entropy = float(-np.sum(p * np.log2(p + 1e-12)))
+                edge_entropy = edge_entropy / max(_math.log2(n_bins), 1e-8)
+        except Exception:
+            edge_entropy = 0.5
+
+    # Composite complexity
+    import math as _math
+    comp_factor = min(1.0, _math.log2(1 + n_comp) / 5.0)
+    vert_factor = min(1.0, _math.log2(1 + n_verts) / 13.0)
+
+    complexity = (
+        0.30 * comp_factor +
+        0.30 * curvature_entropy +
+        0.15 * edge_entropy +
+        0.15 * vert_factor +
+        0.10 * min(1.0, aspect_spread * 3)
+    )
+    complexity = max(0.0, min(1.0, complexity))
+
+    # Op budget: 4 (simple) to 60 (complex)
+    base_ops = 4
+    max_budget = 60
+    op_budget = int(base_ops + complexity * (max_budget - base_ops))
+    op_budget = max(op_budget, min(n_comp, max_budget))
+
+    return {
+        "complexity": round(complexity, 4),
+        "n_components": n_comp,
+        "curvature_entropy": round(curvature_entropy, 4),
+        "edge_entropy": round(edge_entropy, 4),
+        "aspect_spread": round(aspect_spread, 4),
+        "vertex_count": n_verts,
+        "op_budget": op_budget,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Data structures
 # ---------------------------------------------------------------------------
 
@@ -846,14 +968,22 @@ def _estimate_height_divs(vertices, axis, center, height):
 def initial_program(target_v, target_f):
     """Create a CadProgram that covers the target mesh.
 
-    For simple meshes (few components), tries all four primitives and picks
-    the best. For complex multi-component meshes (trees, humanoids), fits
-    one cylinder per connected component to capture branches/limbs correctly.
+    Uses adaptive complexity-based op budget and multiple strategies:
+    1. Per-component fitting for multi-component meshes (trees, humanoids)
+    2. Single best primitive (sphere, cylinder, revolve, box, cone)
+    3. Axial segmentation (split along principal axis)
+    4. Geometric segmentation (convexity/SDF/skeleton decomposition)
+
+    Picks whichever strategy gives the highest accuracy.
     """
     from .elegance import score_accuracy
 
     target_v = np.asarray(target_v, dtype=np.float64)
     target_f = np.asarray(target_f)
+
+    # Compute mesh complexity and adaptive op budget
+    mc = mesh_complexity(target_v, target_f)
+    budget = mc["op_budget"]
 
     # Decompose into connected components
     from scipy.sparse import csr_matrix
@@ -882,7 +1012,10 @@ def initial_program(target_v, target_f):
         ops = []
         # Fit best primitive to each significant component using
         # Hausdorff-based accuracy (not fitting residual) as criterion
-        max_ops = min(len(comps), 30)
+        # Cap at budget but with a performance ceiling for highly-branching
+        # meshes where mutation evaluation becomes expensive.
+        performance_cap = 35 if len(comps) > 50 else budget
+        max_ops = min(len(comps), budget, performance_cap)
         for comp_idx in comps[:max_ops]:
             comp_v = target_v[comp_idx]
             best_op = None
@@ -919,19 +1052,32 @@ def initial_program(target_v, target_f):
     # also axial segmentation (split along principal axis into 2-4 slices,
     # fit a cylinder per slice — good for tapered/varied-radius shapes)
     best_single = _best_single_primitive(target_v, target_f)
-    best_segmented = _axial_segmented_program(target_v, target_f)
+    best_axial = _axial_segmented_program(target_v, target_f)
+    best_geom = _segmented_program(target_v, target_f, budget=budget)
 
-    if best_single is None and best_segmented is None:
-        return CadProgram([_make_candidate_op("sphere", target_v)])
+    # Refine single-primitive revolve/profiled_cylinder before comparing
+    if best_single is not None:
+        for si, sop in enumerate(best_single.operations):
+            if sop.enabled and sop.op_type in ("revolve", "profiled_cylinder"):
+                refine_operation(best_single, si, target_v, target_f,
+                                 max_iter=15)
+                break
 
     from .elegance import score_accuracy
     candidates = []
     if best_single is not None:
         candidates.append((score_accuracy(best_single, target_v, target_f),
                            best_single))
-    if best_segmented is not None:
-        candidates.append((score_accuracy(best_segmented, target_v, target_f),
-                           best_segmented))
+    if best_axial is not None:
+        candidates.append((score_accuracy(best_axial, target_v, target_f),
+                           best_axial))
+    if best_geom is not None:
+        candidates.append((score_accuracy(best_geom, target_v, target_f),
+                           best_geom))
+
+    if not candidates:
+        return CadProgram([_make_candidate_op("sphere", target_v)])
+
     candidates.sort(key=lambda x: x[0], reverse=True)
     return candidates[0][1]
 
@@ -1025,6 +1171,98 @@ def _build_segmented_ops(v, proj, boundaries, span):
                 pass
 
         if best_op is not None:
+            ops.append(best_op)
+
+    if len(ops) < 2:
+        return None
+    return CadProgram(ops)
+
+
+def _segmented_program(target_v, target_f, budget=20):
+    """Build a CadProgram by geometrically segmenting the mesh.
+
+    Unlike connected-component decomposition (which only works for
+    disconnected parts) or axial segmentation (which only works for
+    elongated shapes), geometric segmentation decomposes a single
+    connected mesh into regions that are each well-described by a
+    single CAD primitive.
+
+    For example, a chair becomes: 4 leg-cylinders + 1 seat-box + 1 back,
+    each fitted independently for high accuracy.
+    """
+    from .elegance import score_accuracy
+    from .segmentation import segment_mesh
+
+    try:
+        segments = segment_mesh(target_v, target_f, strategy="auto")
+    except Exception:
+        return None
+
+    if not segments or len(segments) < 2:
+        return None
+
+    # Sort by vertex count descending (largest segments first)
+    segments.sort(key=lambda s: len(s.vertices), reverse=True)
+
+    ops = []
+    empty_f = np.zeros((0, 3), dtype=np.int64)
+
+    for seg in segments[:budget]:
+        seg_v = seg.vertices
+        if len(seg_v) < 4:
+            continue
+
+        # Skip fillet/blend segments — these are transition surfaces
+        # between primitives that mask the underlying sharp intersections.
+        # Including fillet geometry in primitive fitting distorts the fit.
+        # Fillets can be covered later by gap-fill ops if needed.
+        if getattr(seg, 'is_fillet', False):
+            continue
+
+        # Choose fitting strategy based on segment classification
+        if seg.cad_action == "revolve":
+            # Segment is rotationally symmetric — try auto_revolve first
+            shapes = ("auto_revolve", "profiled_cylinder", "cylinder", "sphere")
+        elif seg.cad_action == "extrude":
+            shapes = ("box", "cylinder", "profiled_cylinder")
+        elif seg.cad_action == "sweep":
+            shapes = ("profiled_cylinder", "cylinder", "auto_revolve")
+        else:
+            # loft / freeform — try everything
+            shapes = ("cylinder", "box", "sphere", "profiled_cylinder")
+
+        # Skip expensive fits for tiny segments
+        if len(seg_v) < 30:
+            shapes = tuple(s for s in shapes
+                           if s not in ("auto_revolve", "profiled_cylinder"))
+            if not shapes:
+                shapes = ("cylinder", "sphere")
+
+        best_op = None
+        best_acc = -1.0
+
+        for shape in shapes:
+            try:
+                op = _make_candidate_op(shape, seg_v)
+                if op is None:
+                    continue
+                test_prog = CadProgram([op])
+                acc = score_accuracy(test_prog, seg_v, empty_f)
+                if acc > best_acc:
+                    best_acc = acc
+                    best_op = op
+            except Exception:
+                pass
+
+        if best_op is not None:
+            # Refine revolve/profiled_cylinder ops for better initial fit
+            if best_op.op_type in ("revolve", "profiled_cylinder") and len(seg_v) >= 20:
+                try:
+                    test_prog = CadProgram([best_op])
+                    refine_operation(test_prog, 0, seg_v, empty_f, max_iter=5)
+                    best_op = test_prog.operations[0]
+                except Exception:
+                    pass
             ops.append(best_op)
 
     if len(ops) < 2:

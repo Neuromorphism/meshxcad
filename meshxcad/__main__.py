@@ -540,6 +540,37 @@ def _run_classify(args):
         print(f"All scores: {result['all_scores']}")
 
 
+def _run_segment(args):
+    """Segment mesh into CAD-friendly regions."""
+    from .segmentation import segment_mesh
+    target_v, target_f = load_mesh(args.mesh)
+    strategy = getattr(args, 'strategy', 'auto')
+    segments = segment_mesh(target_v, target_f, strategy=strategy)
+
+    if getattr(args, 'json', False):
+        result = []
+        for seg in segments:
+            result.append({
+                "id": seg.segment_id,
+                "vertices": len(seg.vertices),
+                "faces": len(seg.faces),
+                "action": seg.cad_action,
+                "quality": round(seg.quality, 3),
+                "is_fillet": seg.is_fillet,
+                "label": seg.label,
+                "centroid": seg.centroid.tolist(),
+            })
+        print(json.dumps(result, indent=2))
+    else:
+        n_fillets = sum(1 for s in segments if s.is_fillet)
+        print(f"Segments: {len(segments)}  (fillets: {n_fillets})")
+        for seg in segments:
+            fillet_tag = " [FILLET]" if seg.is_fillet else ""
+            print(f"  seg {seg.segment_id:>2}: {len(seg.vertices):>4}v "
+                  f"{len(seg.faces):>4}f  action={seg.cad_action:<8} "
+                  f"quality={seg.quality:.2f}{fillet_tag}")
+
+
 def _run_fit(args):
     """Fit primitive shapes to mesh."""
     from .cad_program import _make_candidate_op, CadProgram
@@ -748,6 +779,24 @@ drawing mode:
     classify_p.add_argument("--json", action="store_true",
                              help="Output as JSON")
 
+    # complexity: estimate mesh complexity and recommended op budget
+    complex_p = subparsers.add_parser("complexity",
+                                       help="Estimate mesh complexity and op budget")
+    complex_p.add_argument("mesh", help="Input mesh file")
+    complex_p.add_argument("--json", action="store_true",
+                            help="Output as JSON")
+
+    # segment: decompose mesh into CAD-friendly regions
+    seg_p = subparsers.add_parser("segment",
+                                   help="Segment mesh into CAD-friendly regions")
+    seg_p.add_argument("mesh", help="Input mesh file")
+    seg_p.add_argument("--strategy", default="auto",
+                        choices=["auto", "skeleton", "sdf", "convexity",
+                                 "projection", "normal_cluster"],
+                        help="Segmentation strategy (default: auto)")
+    seg_p.add_argument("--json", action="store_true",
+                        help="Output as JSON")
+
     # fit: fit primitives to mesh
     fit_p = subparsers.add_parser("fit",
                                    help="Fit primitive shapes to mesh")
@@ -845,6 +894,12 @@ drawing mode:
         return
     if args.command == "classify":
         _run_classify(args)
+        return
+    if args.command == "complexity":
+        _run_complexity(args)
+        return
+    if args.command == "segment":
+        _run_segment(args)
         return
     if args.command == "fit":
         _run_fit(args)
