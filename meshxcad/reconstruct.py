@@ -279,6 +279,198 @@ def fit_cone(vertices):
     }
 
 
+def fit_profiled_cylinder(vertices, n_sections=8):
+    """Fit a profiled (tapered/variable-radius) cylinder to a point cloud.
+
+    Instead of a single radius, samples cross-sections along the principal
+    axis and fits radius at each height.  Returns a piecewise-linear
+    radius profile that captures taper, bulges, and narrowings.
+
+    Args:
+        vertices: (N, 3) array
+        n_sections: number of cross-section samples along the axis
+
+    Returns:
+        dict with center, axis, height, radii (list of floats),
+        heights (list of floats from 0 to 1), residual
+    """
+    v = np.asarray(vertices, dtype=np.float64)
+    center = v.mean(axis=0)
+    centered = v - center
+
+    # PCA for axis
+    cov = centered.T @ centered / len(v)
+    eigvals, eigvecs = np.linalg.eigh(cov)
+    order = np.argsort(eigvals)[::-1]
+
+    # Try all 3 axes, pick best
+    best = None
+    for ax_idx in range(3):
+        axis = eigvecs[:, order[ax_idx]].copy()
+        if axis[2] < 0:
+            axis = -axis
+
+        proj = centered @ axis
+        p_min, p_max = float(proj.min()), float(proj.max())
+        height = p_max - p_min
+        if height < 1e-8:
+            continue
+
+        # Sample radii at n_sections heights
+        radii = []
+        heights = []
+        residuals = []
+        for i in range(n_sections):
+            t = i / (n_sections - 1)
+            h = p_min + t * height
+            # Select vertices near this height (within a band)
+            band = height / (n_sections * 1.5)
+            mask = np.abs(proj - h) < band
+            if np.sum(mask) < 3:
+                # Widen band
+                mask = np.abs(proj - h) < band * 3
+            if np.sum(mask) < 3:
+                continue
+
+            slice_pts = centered[mask]
+            radial = slice_pts - np.outer(np.dot(slice_pts, axis), axis)
+            r_dists = np.linalg.norm(radial, axis=1)
+            r = float(np.median(r_dists))
+            res = float(np.mean(np.abs(r_dists - r)))
+
+            radii.append(r)
+            heights.append(t)
+            residuals.append(res)
+
+        if len(radii) < 2:
+            continue
+
+        mean_residual = float(np.mean(residuals))
+
+        # Check if profile is truly tapered (not uniform)
+        r_arr = np.array(radii)
+        r_range = r_arr.max() - r_arr.min()
+        r_mean = r_arr.mean()
+
+        base_pos = center + axis * p_min
+
+        result = {
+            "center": base_pos + axis * height / 2,
+            "base": base_pos,
+            "axis": axis.copy(),
+            "height": height,
+            "radii": radii,
+            "heights": heights,
+            "residual": mean_residual,
+            "taper_ratio": float(r_range / max(r_mean, 1e-8)),
+        }
+
+        if best is None or mean_residual < best["residual"]:
+            best = result
+
+    if best is None:
+        # Fallback to uniform cylinder
+        cyl = fit_cylinder(vertices)
+        return {
+            **cyl,
+            "radii": [cyl["radius"], cyl["radius"]],
+            "heights": [0.0, 1.0],
+            "taper_ratio": 0.0,
+        }
+
+    return best
+
+
+def fit_revolve_profile(vertices, n_slices=20):
+    """Fit a revolve profile to a point cloud.
+
+    Samples the radial distance at multiple heights along the best axis
+    to reconstruct the cross-section profile.  This captures complex
+    shapes like pistons, vases, goblets, etc.
+
+    Args:
+        vertices: (N, 3) array
+        n_slices: number of height samples for the profile
+
+    Returns:
+        dict with center, axis, height, profile (list of (radius, height) tuples),
+        residual
+    """
+    v = np.asarray(vertices, dtype=np.float64)
+    center = v.mean(axis=0)
+    centered = v - center
+
+    # PCA for axis
+    cov = centered.T @ centered / len(v)
+    eigvals, eigvecs = np.linalg.eigh(cov)
+    order = np.argsort(eigvals)[::-1]
+
+    # Try the principal axis (longest) as revolve axis
+    best = None
+    for ax_idx in range(3):
+        axis = eigvecs[:, order[ax_idx]].copy()
+        if axis[2] < 0:
+            axis = -axis
+
+        proj = centered @ axis
+        p_min, p_max = float(proj.min()), float(proj.max())
+        height = p_max - p_min
+        if height < 1e-8:
+            continue
+
+        # Measure radii at each height slice
+        radial = centered - np.outer(proj, axis)
+        radii_all = np.linalg.norm(radial, axis=1)
+
+        profile = []
+        residuals = []
+        for i in range(n_slices):
+            t = i / (n_slices - 1)
+            h = p_min + t * height
+            band = height / (n_slices * 1.2)
+            mask = np.abs(proj - h) < band
+            if np.sum(mask) < 2:
+                mask = np.abs(proj - h) < band * 3
+            if np.sum(mask) < 2:
+                continue
+
+            r_vals = radii_all[mask]
+            r = float(np.median(r_vals))
+            res = float(np.mean(np.abs(r_vals - r)))
+
+            profile.append((max(r, 0.01), float(h - p_min)))
+            residuals.append(res)
+
+        if len(profile) < 3:
+            continue
+
+        mean_residual = float(np.mean(residuals))
+        base_pos = center + axis * p_min
+
+        result = {
+            "center": base_pos,
+            "axis": axis.copy(),
+            "height": height,
+            "profile": profile,
+            "residual": mean_residual,
+        }
+
+        if best is None or mean_residual < best["residual"]:
+            best = result
+
+    if best is None:
+        # Fallback
+        return {
+            "center": center,
+            "axis": np.array([0, 0, 1.0]),
+            "height": float(v[:, 2].max() - v[:, 2].min()),
+            "profile": [(1.0, 0.0), (1.0, 1.0)],
+            "residual": 999.0,
+        }
+
+    return best
+
+
 def fit_box(vertices):
     """Fit an oriented bounding box to a point cloud.
 

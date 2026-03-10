@@ -63,7 +63,7 @@ from .objects.builder import combine_meshes
 # efficiently, minimize boolean complexity.
 OP_TIER = {
     # Tier 1 — fundamental primitives (most elegant when appropriate)
-    "sphere": 1, "cylinder": 1, "box": 1, "cone": 1,
+    "sphere": 1, "cylinder": 1, "profiled_cylinder": 1, "box": 1, "cone": 1,
     # Tier 2 — profile-based generation (clean parametric intent)
     "extrude": 2, "revolve": 2, "torus": 2,
     # Tier 3 — path-based (higher complexity, but sometimes necessary)
@@ -1271,13 +1271,34 @@ def _mutate_for_elegance(program, target_v, target_f, rng):
             if rm_acc > 0.5:
                 mutations.append(("remove_boolean", p))
 
+    # Strategy 4b: Upgrade cylinder → profiled_cylinder for tapered shapes
+    for i, op in enumerate(program.operations):
+        if op.enabled and op.op_type == "cylinder":
+            from .cad_program import _make_candidate_op
+            try:
+                # Get the target vertices near this cylinder
+                cad_v_temp, _ = program.evaluate()
+                if len(cad_v_temp) == 0:
+                    continue
+                # Use profiled_cylinder fitting on the full target
+                pc_op = _make_candidate_op("profiled_cylinder", target_v)
+                if pc_op is not None:
+                    p = program.copy()
+                    p.operations[i] = pc_op
+                    p.invalidate_cache()
+                    mutations.append(("upgrade_to_profiled", p))
+                    break
+            except Exception:
+                pass
+
     # Strategy 5: Refine existing ops for better accuracy without adding more
-    # Skip if accuracy is already high (expensive and unlikely to help)
-    if acc < 0.95:
+    # Skip if accuracy is already very high (expensive and unlikely to help)
+    if acc < 0.99:
         for i, op in enumerate(program.operations):
-            if op.enabled and op.op_type in ("sphere", "cylinder", "box", "cone"):
+            if op.enabled and op.op_type in ("sphere", "cylinder", "profiled_cylinder",
+                                               "box", "cone", "revolve"):
                 p = program.copy()
-                refine_operation(p, i, target_v, target_f, max_iter=10)
+                refine_operation(p, i, target_v, target_f, max_iter=15)
                 mutations.append(("refine_" + op.op_type, p))
                 break
 
@@ -1302,7 +1323,7 @@ def _mutate_for_elegance(program, target_v, target_f, rng):
             mutations.append(("add_for_accuracy", p))
 
     # Strategy 8: Add + refine gap primitive (more thorough than strategy 7)
-    if acc < 0.96 and program.n_enabled() < 8:
+    if acc < 0.99 and program.n_enabled() < 10:
         gaps = find_program_gaps(program, target_v, target_f, max_gaps=2)
         for i, gap in enumerate(gaps):
             if gap.action == "add":
@@ -1337,7 +1358,7 @@ def _mutate_for_elegance(program, target_v, target_f, rng):
         _try_torus_ring(program, target_v, target_f, mutations)
 
     # Strategy 12: Refine all ops (not just first) for multi-op programs
-    if 2 <= program.n_enabled() <= 4:
+    if 2 <= program.n_enabled() <= 8:
         p = program.copy()
         for i, op in enumerate(p.operations):
             if op.enabled:
@@ -1359,6 +1380,41 @@ def _mutate_for_elegance(program, target_v, target_f, rng):
             if changed:
                 p.invalidate_cache()
                 mutations.append((f"batch_hdivs_{trial_hdivs}", p))
+
+    # Strategy 12c: Per-component profiled_cylinder upgrade
+    # For programs with cylinder ops, try upgrading each to profiled_cylinder
+    if acc < 0.99:
+        for i, op in enumerate(program.operations):
+            if (op.enabled and op.op_type == "cylinder"
+                    and op.params.get("height", 0) > 0):
+                from .cad_program import _make_candidate_op
+                try:
+                    # Collect target vertices near this cylinder
+                    cad_v_temp, _ = program.evaluate()
+                    if len(cad_v_temp) == 0:
+                        continue
+                    op_mesh = _eval_op(op, [])
+                    if op_mesh is None:
+                        continue
+                    op_v, _ = op_mesh
+                    from scipy.spatial import KDTree
+                    tree = KDTree(op_v)
+                    bbox_diag = float(np.linalg.norm(
+                        target_v.max(0) - target_v.min(0)))
+                    d, _ = tree.query(target_v)
+                    near_mask = d < bbox_diag * 0.15
+                    near_v = target_v[near_mask]
+                    if len(near_v) < 10:
+                        continue
+                    pc_op = _make_candidate_op("profiled_cylinder", near_v)
+                    if pc_op is not None:
+                        p = program.copy()
+                        p.operations[i] = pc_op
+                        p.invalidate_cache()
+                        mutations.append((f"upgrade_cyl_{i}_to_profiled", p))
+                        break  # Only try one per round
+                except Exception:
+                    pass
 
     # Strategy 13: Add scaled copy at offset (cover more of the target)
     if acc < 0.7 and program.n_enabled() == 1:
@@ -1518,7 +1574,7 @@ def _try_feature_targeted_fill(program, target_v, target_f, mutations, rng):
     scored.sort(key=lambda x: x[0])
 
     # Try adding a primitive for the worst-covered features (up to 2)
-    from .reconstruct import fit_sphere, fit_cylinder, fit_box
+    from .reconstruct import fit_sphere, fit_cylinder, fit_box, fit_profiled_cylinder
     for coverage, feat in scored[:2]:
         if coverage > 0.7:
             break  # already well-covered
@@ -1554,6 +1610,20 @@ def _try_feature_targeted_fill(program, target_v, target_f, mutations, rng):
                     "axis": cy["axis"].tolist(),
                     "radius": cy["radius"],
                     "height": cy["height"],
+                })
+        except Exception:
+            pass
+
+        try:
+            pc = fit_profiled_cylinder(feat_pts)
+            if pc["residual"] < best_residual and pc.get("taper_ratio", 0) > 0.05:
+                best_residual = pc["residual"]
+                best_op = CadOp("profiled_cylinder", {
+                    "center": pc["center"].tolist(),
+                    "axis": pc["axis"].tolist(),
+                    "height": pc["height"],
+                    "radii": pc["radii"],
+                    "heights": pc["heights"],
                 })
         except Exception:
             pass

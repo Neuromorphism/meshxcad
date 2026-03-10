@@ -25,7 +25,7 @@ from scipy.spatial import KDTree
 from .general_align import hausdorff_distance, surface_distance_map
 from .reconstruct import (
     classify_mesh, fit_sphere, fit_cylinder, fit_cone, fit_box,
-    _rotation_between,
+    fit_profiled_cylinder, fit_revolve_profile, _rotation_between,
 )
 from .objects.builder import revolve_profile, combine_meshes, make_torus
 from .objects.operations import (
@@ -41,6 +41,7 @@ from .synthetic import make_sphere_mesh, make_cylinder_mesh
 OP_COSTS = {
     "sphere": 1.0,
     "cylinder": 1.0,
+    "profiled_cylinder": 1.5,
     "cone": 1.5,
     "box": 1.0,
     "torus": 1.5,
@@ -234,6 +235,31 @@ def _eval_op(op, existing_meshes):
         v = v @ R.T + center
         return v, f
 
+    if t == "profiled_cylinder":
+        h = p.get("height", 1.0)
+        radii = p.get("radii", [1.0, 1.0])
+        heights = p.get("heights", [i / max(len(radii) - 1, 1)
+                                     for i in range(len(radii))])
+        n_angular = int(p.get("divs", 24))
+        # Build revolve profile from (radius, z) pairs
+        profile = []
+        for ri, hi in zip(radii, heights):
+            r = max(float(ri), 0.005)
+            z = float(hi) * h
+            profile.append((r, z))
+        if len(profile) < 2:
+            profile = [(max(radii[0], 0.005), 0.0),
+                       (max(radii[-1], 0.005), h)]
+        v, f = revolve_profile(profile, n_angular)
+        center = np.asarray(p.get("center", [0, 0, 0]), dtype=np.float64)
+        axis = np.asarray(p.get("axis", [0, 0, 1]), dtype=np.float64)
+        # Align to axis
+        z_ax = np.array([0.0, 0.0, 1.0])
+        axis_n = axis / (np.linalg.norm(axis) + 1e-12)
+        R = _rotation_between(z_ax, axis_n)
+        v = v @ R.T + center
+        return v, f
+
     if t == "cone":
         h = p.get("height", 1.0)
         base_r = p.get("base_radius", 1.0)
@@ -264,9 +290,23 @@ def _eval_op(op, existing_meshes):
         return v + center, f
 
     if t == "revolve":
-        profile = p.get("profile", [(1, 0), (1, 1)])
+        profile = p.get("profile")
+        if profile is None:
+            # Build from separate radii/heights params if available
+            radii = p.get("radii", [1.0, 1.0])
+            heights = p.get("heights", [0.0, 1.0])
+            profile = list(zip(radii, heights))
+        # Ensure all radii are positive
+        profile = [(max(float(r), 0.005), float(z)) for r, z in profile]
         v, f = revolve_profile(profile, int(p.get("divs", 24)))
         center = np.asarray(p.get("center", [0, 0, 0]), dtype=np.float64)
+        axis = p.get("axis")
+        if axis is not None:
+            axis = np.asarray(axis, dtype=np.float64)
+            z_ax = np.array([0.0, 0.0, 1.0])
+            axis_n = axis / (np.linalg.norm(axis) + 1e-12)
+            R = _rotation_between(z_ax, axis_n)
+            v = v @ R.T
         return v + center, f
 
     if t == "extrude":
@@ -711,6 +751,19 @@ def _make_candidate_op(shape, target_v):
         if h_divs is not None:
             op_params["h_divs"] = h_divs
         return CadOp("cylinder", op_params)
+    elif shape == "profiled_cylinder":
+        params = fit_profiled_cylinder(target_v)
+        # Only use profiled if actually tapered (taper_ratio > 5%)
+        if params.get("taper_ratio", 0) < 0.05:
+            return None
+        op_params = {
+            "center": params["center"].tolist(),
+            "axis": params["axis"].tolist(),
+            "height": params["height"],
+            "radii": params["radii"],
+            "heights": params["heights"],
+        }
+        return CadOp("profiled_cylinder", op_params)
     elif shape == "cone":
         params = fit_cone(target_v)
         # Center is the base of the cone, not the apex
@@ -730,6 +783,20 @@ def _make_candidate_op(shape, target_v):
             "top_radius": max(params["top_radius"], 0.01),
             "height": params["height"],
         })
+    elif shape == "auto_revolve":
+        params = fit_revolve_profile(target_v)
+        if params["residual"] > 100:
+            return None
+        # Store as radii/heights for coordinate descent refinement
+        radii = [r for r, z in params["profile"]]
+        heights = [z for r, z in params["profile"]]
+        op_params = {
+            "radii": radii,
+            "heights": heights,
+            "center": params["center"].tolist(),
+            "axis": params["axis"].tolist(),
+        }
+        return CadOp("revolve", op_params)
     elif shape == "box":
         params = fit_box(target_v)
         return CadOp("box", {
@@ -820,7 +887,7 @@ def initial_program(target_v, target_f):
             comp_v = target_v[comp_idx]
             best_op = None
             best_acc = -1.0
-            for shape in ("cylinder", "box", "sphere"):
+            for shape in ("profiled_cylinder", "cylinder", "box", "sphere"):
                 try:
                     op = _make_candidate_op(shape, comp_v)
                     if op is None:
@@ -944,7 +1011,7 @@ def _build_segmented_ops(v, proj, boundaries, span):
         best_acc = -1.0
         empty_f = np.zeros((0, 3), dtype=np.int64)
 
-        for shape in ("cylinder", "box", "cone"):
+        for shape in ("profiled_cylinder", "cylinder", "box", "cone"):
             try:
                 op = _make_candidate_op(shape, seg_v)
                 if op is None:
@@ -970,7 +1037,7 @@ def _best_single_primitive(target_v, target_f):
     from .elegance import score_accuracy
 
     candidates = []
-    for shape in ("sphere", "cylinder", "cone", "box"):
+    for shape in ("sphere", "cylinder", "profiled_cylinder", "auto_revolve", "cone", "box"):
         try:
             op = _make_candidate_op(shape, target_v)
             if op is not None:

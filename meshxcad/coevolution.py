@@ -365,7 +365,7 @@ class ObjectState:
 # Alternating loop runner
 # ============================================================================
 
-MIN_IMPROVEMENT_THRESHOLD = 0.002  # ignore changes smaller than this
+MIN_IMPROVEMENT_THRESHOLD = 0.001  # ignore changes smaller than this
 ACCURACY_FLOOR = 0.40  # never accept mutations that drop accuracy below this (for high-acc starts)
 
 
@@ -373,10 +373,11 @@ def _joint_score(elegance, cad_score, accuracy):
     """Unified objective: high elegance + high accuracy + low cad-likeness.
 
     Both loops use this same objective so they cannot undo each other's work.
+    Accuracy is weighted highest because the primary goal is geometric fidelity.
     """
     # Elegance and accuracy are 0-1 (higher is better)
     # cad_score is 0-1 (lower is better — less detectable as CAD)
-    return elegance * 0.5 + accuracy * 0.3 + (1.0 - cad_score) * 0.2
+    return elegance * 0.35 + accuracy * 0.45 + (1.0 - cad_score) * 0.20
 
 
 def _run_discriminator_pass(state, library, rng, rounds_per_object=5):

@@ -523,6 +523,191 @@ def _mutate_program(program):
     return prog
 
 
+# ---------------------------------------------------------------------------
+# Individual tool subcommands (for agent / programmatic use)
+# ---------------------------------------------------------------------------
+
+def _run_classify(args):
+    """Classify mesh shape type."""
+    from .reconstruct import classify_mesh
+    target_v, target_f = load_mesh(args.mesh)
+    result = classify_mesh(target_v, target_f)
+    if getattr(args, 'json', False):
+        print(json.dumps(result, indent=2, default=str))
+    else:
+        print(f"Shape type: {result['shape_type']}")
+        print(f"Confidence: {result['confidence']}")
+        print(f"All scores: {result['all_scores']}")
+
+
+def _run_fit(args):
+    """Fit primitive shapes to mesh."""
+    from .cad_program import _make_candidate_op, CadProgram
+    from .elegance import score_accuracy
+    from .reconstruct import (fit_sphere, fit_cylinder, fit_cone, fit_box,
+                              fit_profiled_cylinder, fit_revolve_profile)
+
+    target_v, target_f = load_mesh(args.mesh)
+    target_v = np.asarray(target_v, dtype=np.float64)
+    target_f = np.asarray(target_f)
+
+    if args.shape:
+        shapes = [args.shape]
+    else:
+        shapes = ["sphere", "cylinder", "profiled_cylinder",
+                  "auto_revolve", "cone", "box"]
+
+    results = []
+    for shape in shapes:
+        try:
+            op = _make_candidate_op(shape, target_v)
+            if op is None:
+                continue
+            prog = CadProgram([op])
+            acc = score_accuracy(prog, target_v, target_f)
+            results.append({
+                "shape": shape,
+                "op_type": op.op_type,
+                "accuracy": round(acc, 4),
+                "params": op.to_dict()["params"],
+            })
+        except Exception as e:
+            results.append({"shape": shape, "error": str(e)})
+
+    results.sort(key=lambda r: r.get("accuracy", 0), reverse=True)
+
+    if getattr(args, 'json', False):
+        print(json.dumps(results, indent=2, default=str))
+    else:
+        for r in results:
+            if "error" in r:
+                print(f"  {r['shape']}: ERROR - {r['error']}")
+            else:
+                print(f"  {r['shape']} ({r['op_type']}): accuracy={r['accuracy']}")
+
+
+def _run_profile(args):
+    """Fit variable-radius profile along axis."""
+    from .reconstruct import fit_profiled_cylinder, fit_revolve_profile
+
+    target_v, _ = load_mesh(args.mesh)
+
+    pc = fit_profiled_cylinder(target_v, n_sections=args.sections)
+    rv = fit_revolve_profile(target_v, n_slices=args.sections)
+
+    result = {
+        "profiled_cylinder": {
+            "height": pc["height"],
+            "taper_ratio": pc.get("taper_ratio", 0),
+            "radii": pc["radii"],
+            "heights": pc["heights"],
+            "residual": pc["residual"],
+        },
+        "revolve_profile": {
+            "height": rv["height"],
+            "profile": rv["profile"],
+            "residual": rv["residual"],
+        },
+    }
+
+    if getattr(args, 'json', False):
+        print(json.dumps(result, indent=2, default=str))
+    else:
+        print(f"Profiled cylinder: taper={pc.get('taper_ratio', 0):.3f}, "
+              f"residual={pc['residual']:.4f}")
+        print(f"  radii: {[round(r, 2) for r in pc['radii']]}")
+        print(f"Revolve profile: residual={rv['residual']:.4f}")
+        print(f"  profile: {[(round(r, 2), round(z, 2)) for r, z in rv['profile'][:10]]}")
+
+
+def _run_reconstruct(args):
+    """Auto-reconstruct CAD from mesh."""
+    from .reconstruct import reconstruct_cad
+    from .stl_io import write_binary_stl
+
+    target_v, target_f = load_mesh(args.mesh)
+    result = reconstruct_cad(target_v, target_f,
+                              shape_type=getattr(args, 'shape', None))
+
+    print(f"Shape type: {result['shape_type']}")
+    print(f"Quality:    {result['quality']}")
+    print(f"Vertices:   {len(result['cad_vertices'])}")
+    print(f"Faces:      {len(result['cad_faces'])}")
+
+    if args.output:
+        write_binary_stl(args.output, result["cad_vertices"], result["cad_faces"])
+        print(f"Saved to:   {args.output}")
+
+
+def _run_score(args):
+    """Score a CadProgram against a target mesh."""
+    from .cad_program import CadProgram
+    from .elegance import compute_elegance_score, score_accuracy
+    from .elegance import score_feature_fidelity
+
+    target_v, target_f = load_mesh(args.mesh)
+
+    with open(args.program) as f:
+        prog_data = json.load(f)
+    if "program" in prog_data and "operations" in prog_data["program"]:
+        prog = CadProgram.from_dict(prog_data["program"])
+    elif "operations" in prog_data:
+        prog = CadProgram.from_dict(prog_data)
+    else:
+        print("Error: cannot find operations in program JSON", file=sys.stderr)
+        sys.exit(1)
+
+    acc = score_accuracy(prog, target_v, target_f)
+    eleg = compute_elegance_score(prog, target_v, target_f)
+    fid = score_feature_fidelity(prog, target_v, target_f)
+
+    result = {
+        "accuracy": round(acc, 4),
+        "elegance": round(eleg["total"], 4),
+        "feature_fidelity": round(fid, 4),
+        "n_ops": prog.n_enabled(),
+        "program": prog.summary(),
+        "scores": {k: round(v, 4) for k, v in eleg["scores"].items()},
+    }
+    print(json.dumps(result, indent=2))
+
+
+def _run_refine(args):
+    """Refine a CadProgram against a target mesh."""
+    from .cad_program import CadProgram, refine_operation
+    from .elegance import score_accuracy
+
+    target_v, target_f = load_mesh(args.mesh)
+    target_v = np.asarray(target_v, dtype=np.float64)
+    target_f = np.asarray(target_f)
+
+    with open(args.program) as f:
+        prog_data = json.load(f)
+    if "program" in prog_data and "operations" in prog_data["program"]:
+        prog = CadProgram.from_dict(prog_data["program"])
+    elif "operations" in prog_data:
+        prog = CadProgram.from_dict(prog_data)
+    else:
+        print("Error: cannot find operations in program JSON", file=sys.stderr)
+        sys.exit(1)
+
+    acc_before = score_accuracy(prog, target_v, target_f)
+    print(f"Before: accuracy={acc_before:.4f}, {prog.summary()}")
+
+    for i, op in enumerate(prog.operations):
+        if op.enabled:
+            refine_operation(prog, i, target_v, target_f,
+                           max_iter=args.iterations)
+
+    acc_after = score_accuracy(prog, target_v, target_f)
+    print(f"After:  accuracy={acc_after:.4f}, {prog.summary()}")
+
+    out_path = args.output or args.program
+    with open(out_path, "w") as f:
+        json.dump(prog.to_dict(), f, indent=2)
+    print(f"Saved to: {out_path}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="meshxcad",
@@ -538,6 +723,14 @@ examples:
   python -m meshxcad part.stl --fast              # quick single sweep
   python -m meshxcad part.stl --sweeps 30 -r 10   # thorough
 
+individual tools (for agent use):
+  python -m meshxcad classify part.stl            # classify shape type
+  python -m meshxcad fit part.stl                 # fit primitives
+  python -m meshxcad profile part.stl             # fit profiled cylinder
+  python -m meshxcad reconstruct part.stl         # reconstruct CAD mesh
+  python -m meshxcad score part.stl program.json  # score a program
+  python -m meshxcad refine part.stl program.json # refine a program
+
 drawing mode:
   python -m meshxcad drawing input.png            # interpret drawing → CAD
   python -m meshxcad drawing input.png --fast     # quick mode
@@ -545,6 +738,60 @@ drawing mode:
     )
 
     subparsers = parser.add_subparsers(dest="command")
+
+    # --- Tool subcommands (for agent / programmatic use) ---
+
+    # classify: identify shape type
+    classify_p = subparsers.add_parser("classify",
+                                        help="Classify mesh shape type")
+    classify_p.add_argument("mesh", help="Input mesh file")
+    classify_p.add_argument("--json", action="store_true",
+                             help="Output as JSON")
+
+    # fit: fit primitives to mesh
+    fit_p = subparsers.add_parser("fit",
+                                   help="Fit primitive shapes to mesh")
+    fit_p.add_argument("mesh", help="Input mesh file")
+    fit_p.add_argument("--shape", default=None,
+                        choices=["sphere", "cylinder", "cone", "box",
+                                 "profiled_cylinder", "auto_revolve"],
+                        help="Specific shape to fit (default: try all)")
+    fit_p.add_argument("--json", action="store_true",
+                        help="Output as JSON")
+
+    # profile: fit profiled cylinder / revolve profile
+    profile_p = subparsers.add_parser("profile",
+                                       help="Fit variable-radius profile along axis")
+    profile_p.add_argument("mesh", help="Input mesh file")
+    profile_p.add_argument("--sections", type=int, default=12,
+                            help="Number of cross-section samples (default: 12)")
+    profile_p.add_argument("--json", action="store_true",
+                            help="Output as JSON")
+
+    # reconstruct: full auto-reconstruction
+    recon_p = subparsers.add_parser("reconstruct",
+                                     help="Auto-reconstruct CAD from mesh")
+    recon_p.add_argument("mesh", help="Input mesh file")
+    recon_p.add_argument("-o", "--output", default=None,
+                          help="Output STL path")
+    recon_p.add_argument("--shape", default=None,
+                          help="Override shape type")
+
+    # score: evaluate a program against a target
+    score_p = subparsers.add_parser("score",
+                                     help="Score a CadProgram against a target mesh")
+    score_p.add_argument("mesh", help="Target mesh file")
+    score_p.add_argument("program", help="CadProgram JSON file")
+
+    # refine: refine a program against a target
+    refine_p = subparsers.add_parser("refine",
+                                      help="Refine a CadProgram against a target mesh")
+    refine_p.add_argument("mesh", help="Target mesh file")
+    refine_p.add_argument("program", help="CadProgram JSON file")
+    refine_p.add_argument("-o", "--output", default=None,
+                           help="Output JSON path (default: overwrite)")
+    refine_p.add_argument("--iterations", type=int, default=30,
+                           help="Max refinement iterations per op (default: 30)")
 
     # Drawing subcommand
     draw_parser = subparsers.add_parser("drawing",
@@ -592,9 +839,27 @@ drawing mode:
 
     args = parser.parse_args()
 
-    # Dispatch to drawing mode if subcommand
+    # Dispatch to subcommands
     if args.command == "drawing":
         _run_drawing_mode(args)
+        return
+    if args.command == "classify":
+        _run_classify(args)
+        return
+    if args.command == "fit":
+        _run_fit(args)
+        return
+    if args.command == "profile":
+        _run_profile(args)
+        return
+    if args.command == "reconstruct":
+        _run_reconstruct(args)
+        return
+    if args.command == "score":
+        _run_score(args)
+        return
+    if args.command == "refine":
+        _run_refine(args)
         return
 
     # --- Validate inputs ---
