@@ -104,6 +104,9 @@ def cmd_transfer(args):
 
     # --- Scratch-start mode (no --plain) ---
     if args.plain is None:
+        # Handle --no-tracing flag
+        if getattr(args, "no_tracing", False):
+            args.use_tracing = False
         _transfer_scratch(detail_verts, detail_faces, output_path, args, render)
         return
 
@@ -140,11 +143,15 @@ def cmd_transfer(args):
 
 
 def _transfer_scratch(detail_verts, detail_faces, output_path, args, render):
-    """Scratch-start: reconstruct initial shape, then iterate."""
+    """Scratch-start: trace-reconstruct initial shape, then iterate."""
     from .iterative_transfer import scratch_transfer
 
     base, _ = os.path.splitext(output_path)
     output_dir = base + "_iterations" if render else None
+
+    # Use tracing for the initial reconstruction
+    use_tracing = getattr(args, "use_tracing", True)
+    template_name = getattr(args, "template", None)
 
     t0 = time.time()
     result = scratch_transfer(
@@ -156,12 +163,18 @@ def _transfer_scratch(detail_verts, detail_faces, output_path, args, render):
         vision_model=args.vision_model,
         output_dir=output_dir,
         render=render,
+        use_tracing=use_tracing,
+        template_name=template_name,
     )
     elapsed = time.time() - t0
 
     print(f"\nScratch-start complete in {elapsed:.2f}s")
     print(f"  Initial shape: {result['initial_shape_type']} "
           f"(quality={result['initial_quality']:.4f})")
+    if result.get("template_name"):
+        print(f"  Template: {result['template_name']}")
+    if result.get("n_segments"):
+        print(f"  Segments: {result['n_segments']}")
     print(f"  Iterations: {result['iterations']}")
     print(f"  Final mean distance: {result['distances'][-1]:.6f}")
     print(f"  Converged: {result['converged']}")
@@ -171,11 +184,46 @@ def _transfer_scratch(detail_verts, detail_faces, output_path, args, render):
 
     if render:
         _render_comparison_image(
-            result["result_verts"], result["result_faces"],  # use final as "plain" panel
+            result["result_verts"], result["result_faces"],
             detail_verts, detail_faces,
             result["result_verts"], result["result_faces"],
             output_path,
         )
+
+
+def cmd_trace(args):
+    """Trace-reconstruct a mesh into CAD-like geometry (no iteration)."""
+    from .tracing import trace_reconstruct_file
+
+    print(f"Loading mesh: {args.input}")
+    t0 = time.time()
+    result = trace_reconstruct_file(
+        args.input, args.output,
+        template_name=args.template,
+    )
+    elapsed = time.time() - t0
+
+    print(f"  Quality: {result['quality']:.4f}")
+    print(f"  Segments: {result['n_segments']}")
+    if result.get("template_name"):
+        print(f"  Template: {result['template_name']}")
+    print(f"  Done in {elapsed:.2f}s")
+    print(f"Saved: {args.output}")
+
+    if not args.no_render:
+        from .stl_io import read_binary_stl
+        from .render import render_comparison, HAS_MPL
+        if HAS_MPL:
+            input_v, input_f = read_binary_stl(args.input)
+            output_v, output_f = read_binary_stl(args.output)
+            base, _ = os.path.splitext(args.output)
+            image_path = base + "_comparison.png"
+            render_comparison(
+                [(input_v, input_f), (output_v, output_f)],
+                ["Input Mesh", "Traced CAD"],
+                image_path,
+                title="Tracing Reconstruction",
+            )
 
 
 def _transfer_iterative(plain_verts, plain_faces,
@@ -390,7 +438,44 @@ def main():
              "env var, or 'gpt-4o')",
     )
 
+    # Tracing/template control
+    p_transfer.add_argument(
+        "--use-tracing", action="store_true", default=True,
+        help="Use tracing-based reconstruction for scratch-start (default: True)",
+    )
+    p_transfer.add_argument(
+        "--no-tracing", action="store_true", default=False,
+        help="Disable tracing; use basic reconstruct_cad for scratch-start",
+    )
+    p_transfer.add_argument(
+        "--template", type=str, default=None,
+        help="Object template name to guide segmentation (e.g. 'chair', 'dead_tree')",
+    )
+
     p_transfer.set_defaults(func=cmd_transfer)
+
+    # trace command — standalone tracing reconstruction
+    p_trace = subparsers.add_parser(
+        "trace",
+        help="Trace-reconstruct a mesh into CAD-like geometry via segmentation",
+    )
+    p_trace.add_argument(
+        "--input", required=True,
+        help="Path to the input mesh (.stl)",
+    )
+    p_trace.add_argument(
+        "--output", required=True,
+        help="Output path (.stl)",
+    )
+    p_trace.add_argument(
+        "--template", type=str, default=None,
+        help="Object template name (e.g. 'chair', 'dead_tree', 'bicycle')",
+    )
+    p_trace.add_argument(
+        "--no-render", action="store_true", default=False,
+        help="Skip generating comparison image",
+    )
+    p_trace.set_defaults(func=cmd_trace)
 
     args = parser.parse_args()
     if not args.command:

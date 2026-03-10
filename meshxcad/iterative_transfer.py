@@ -202,35 +202,86 @@ def scratch_transfer(detail_verts, detail_faces,
                       vision_model=None,
                       output_dir=None,
                       render=True,
-                      callback=None):
+                      callback=None,
+                      use_tracing=True,
+                      template_name=None):
     """Start from scratch — reconstruct an initial CAD shape from the detail
     mesh, then iteratively refine it.
 
-    This is the entry point when no plain CAD model is provided.
+    Uses the tracing pipeline (segment → trace → reconstruct) by default,
+    falling back to reconstruct_cad if tracing is disabled or fails.
 
     Args:
         detail_verts:    (P,3) target detail mesh vertices
         detail_faces:    (Q,3) target detail mesh faces
+        use_tracing:     use tracing-based reconstruction (default True)
+        template_name:   optional template name to guide tracing
         (remaining args same as iterative_transfer)
 
     Returns:
         Same as iterative_transfer, plus:
             initial_shape_type — the auto-detected shape type
             initial_quality    — quality of the initial reconstruction
+            template_name      — template used (if any)
+            n_segments         — number of segments (if tracing)
     """
-    from .reconstruct import reconstruct_cad
+    shape_type = "unknown"
+    quality = 0.0
+    cad_verts = None
+    cad_faces = None
+    tpl_name = None
+    n_segments = 0
 
-    print("No input CAD provided — reconstructing initial shape from mesh...")
-    recon = reconstruct_cad(detail_verts, detail_faces)
+    # Try tracing first
+    if use_tracing:
+        try:
+            from .tracing import trace_reconstruct, trace_reconstruct_with_template_search
+            from .object_templates import get_template
 
-    shape_type = recon["shape_type"]
-    quality = recon["quality"]
-    cad_verts = recon["cad_vertices"]
-    cad_faces = recon["cad_faces"]
+            print("No input CAD provided — tracing reconstruction from mesh...")
 
-    print(f"  Reconstructed as '{shape_type}' "
-          f"({len(cad_verts)} verts, {len(cad_faces)} faces, "
-          f"quality={quality:.4f})")
+            if template_name:
+                tpl = get_template(template_name)
+                if tpl:
+                    recon = trace_reconstruct(detail_verts, detail_faces, template=tpl)
+                    recon["template_name"] = template_name
+                else:
+                    print(f"  Warning: template '{template_name}' not found, auto-detecting...")
+                    recon = trace_reconstruct_with_template_search(detail_verts, detail_faces)
+            else:
+                recon = trace_reconstruct_with_template_search(detail_verts, detail_faces)
+
+            cad_verts = recon["cad_vertices"]
+            cad_faces = recon["cad_faces"]
+            quality = recon["quality"]
+            n_segments = recon["n_segments"]
+            tpl_name = recon.get("template_name")
+            shape_type = f"traced({n_segments} segments)"
+
+            print(f"  Traced: {n_segments} segments, "
+                  f"{len(cad_verts)} verts, {len(cad_faces)} faces, "
+                  f"quality={quality:.4f}")
+            if tpl_name:
+                print(f"  Template: {tpl_name}")
+        except Exception as e:
+            print(f"  Tracing failed ({e}), falling back to basic reconstruction...")
+            cad_verts = None
+
+    # Fallback to basic reconstruction
+    if cad_verts is None:
+        from .reconstruct import reconstruct_cad
+
+        print("Reconstructing initial shape from mesh (basic mode)...")
+        recon = reconstruct_cad(detail_verts, detail_faces)
+
+        shape_type = recon["shape_type"]
+        quality = recon["quality"]
+        cad_verts = recon["cad_vertices"]
+        cad_faces = recon["cad_faces"]
+
+        print(f"  Reconstructed as '{shape_type}' "
+              f"({len(cad_verts)} verts, {len(cad_faces)} faces, "
+              f"quality={quality:.4f})")
 
     # Now run iterative refinement from the reconstructed shape
     result = iterative_transfer(
@@ -248,4 +299,6 @@ def scratch_transfer(detail_verts, detail_faces,
 
     result["initial_shape_type"] = shape_type
     result["initial_quality"] = quality
+    result["template_name"] = tpl_name
+    result["n_segments"] = n_segments
     return result
