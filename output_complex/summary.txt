@@ -7,5 +7,10 @@ picture_frame,2.2681,0.3868,82.94,PASS
 star_knob,2.5928,0.0907,96.50,PASS
 fluted_column,3.6621,0.0991,97.29,PASS
 castellated_ring,0.5592,0.2713,51.48,PASS
-gear_shift_knob,1.1465,0.6395,44.22,PASS
+gear_shift_knob,1.1465,0.5550,51.59,PASS
 lattice_panel,0.5714,0.4220,26.14,PASS
+pulley_sheave,0.9202,0.3202,65.21,PASS
+heat_sink,2.6208,1.7996,31.33,PASS
+cam_disc,2.6121,0.5679,78.26,PASS
+hinge_plate,3.9012,1.3486,65.43,PASS
+hex_bolt,0.4900,0.0000,100.00,PASS

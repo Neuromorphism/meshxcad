@@ -11,11 +11,12 @@ def compute_detail_displacement(plain_vertices, featured_vertices, plain_faces,
                                  outlier_percentile=95, max_icp_iterations=100):
     """Compute the displacement field that transforms plain geometry into featured.
 
-    Improved algorithm:
-    1. Align using ICP with more iterations
-    2. For each plain vertex, find closest featured vertex
-    3. Reject outlier correspondences (handles topology mismatches)
-    4. Clamp displacement magnitudes to prevent wild deformations
+    Algorithm:
+    1. Intelligent pre-alignment (scale + PCA orientation search + ICP)
+       in both directions, picking the lower-error result.
+    2. For each plain vertex, find closest aligned featured vertex.
+    3. Reject outlier correspondences (handles topology mismatches).
+    4. Clamp displacement magnitudes to prevent wild deformations.
 
     Args:
         plain_vertices: (N, 3) vertices of the plain mesh
@@ -27,52 +28,53 @@ def compute_detail_displacement(plain_vertices, featured_vertices, plain_faces,
     Returns:
         displacements: (N, 3) per-vertex displacement vectors
     """
-    # Try ICP alignment in both directions, pick the one with lower error
-    aligned_fwd, R_fwd, t_fwd = alignment.icp(
+    def _try_candidate(aligned_featured):
+        """Score a candidate by the final result distance (after displacement + outlier clamping)."""
+        tree = KDTree(aligned_featured)
+        distances, indices = tree.query(plain_vertices)
+        disp = aligned_featured[indices] - plain_vertices
+        mags = np.linalg.norm(disp, axis=1)
+        if len(mags) > 0 and np.max(mags) > 0:
+            thresh = np.percentile(mags, outlier_percentile)
+            out = mags > thresh
+            if np.any(out):
+                s = np.ones(len(mags))
+                s[out] = thresh / mags[out]
+                disp = disp * s[:, None]
+        result = plain_vertices + disp
+        # Measure how close result is to the original (unaligned) featured mesh
+        feat_tree = KDTree(featured_vertices)
+        rd, _ = feat_tree.query(result)
+        return float(np.mean(rd)), disp
+
+    candidates = []
+
+    # --- Strategy 1: pre_align forward rotation + ICP (no scale applied to geometry) ---
+    pa_aligned, pa_scale, pa_R, pa_t = alignment.pre_align(
+        featured_vertices, plain_vertices)
+    feat_rotated = (featured_vertices - featured_vertices.mean(axis=0)) @ pa_R.T + plain_vertices.mean(axis=0)
+    icp_result, _, _ = alignment.icp(feat_rotated, plain_vertices, max_iterations=max_icp_iterations)
+    score1, disp1 = _try_candidate(icp_result)
+    candidates.append((score1, disp1))
+
+    # --- Strategy 2: ICP-only forward (handles already-aligned inputs) ---
+    icp_fwd, _, _ = alignment.icp(
         featured_vertices, plain_vertices, max_iterations=max_icp_iterations
     )
-    fwd_tree = KDTree(aligned_fwd)
-    fwd_dists, _ = fwd_tree.query(plain_vertices)
-    fwd_error = np.mean(fwd_dists)
+    score2, disp2 = _try_candidate(icp_fwd)
+    candidates.append((score2, disp2))
 
-    # Also try aligning plain to featured (reverse direction)
-    aligned_rev, R_rev, t_rev = alignment.icp(
+    # --- Strategy 3: ICP-only reverse ---
+    icp_rev, R_icp_rev, t_icp_rev = alignment.icp(
         plain_vertices, featured_vertices, max_iterations=max_icp_iterations
     )
-    # Invert: we need featured in plain's frame
-    # If plain was moved to featured's frame by R_rev, t_rev:
-    #   aligned_rev = R_rev @ plain + t_rev  (≈ featured)
-    # So featured in plain's frame = R_rev^T @ (featured - t_rev)
-    aligned_rev_featured = (np.linalg.inv(R_rev) @ (featured_vertices - t_rev).T).T
-    rev_tree = KDTree(aligned_rev_featured)
-    rev_dists, _ = rev_tree.query(plain_vertices)
-    rev_error = np.mean(rev_dists)
+    icp_rev_featured = (np.linalg.inv(R_icp_rev) @ (featured_vertices - t_icp_rev).T).T
+    score3, disp3 = _try_candidate(icp_rev_featured)
+    candidates.append((score3, disp3))
 
-    # Pick the better alignment
-    if fwd_error <= rev_error:
-        aligned_featured = aligned_fwd
-    else:
-        aligned_featured = aligned_rev_featured
-
-    # Find correspondences
-    tree = KDTree(aligned_featured)
-    distances, indices = tree.query(plain_vertices)
-
-    # Compute raw displacements
-    displacements = aligned_featured[indices] - plain_vertices
-
-    # Outlier rejection: clamp large displacements
-    disp_mags = np.linalg.norm(displacements, axis=1)
-    if len(disp_mags) > 0 and np.max(disp_mags) > 0:
-        threshold = np.percentile(disp_mags, outlier_percentile)
-        outliers = disp_mags > threshold
-        if np.any(outliers):
-            # Scale down outlier displacements to the threshold
-            scale = np.ones(len(disp_mags))
-            scale[outliers] = threshold / disp_mags[outliers]
-            displacements = displacements * scale[:, None]
-
-    return displacements
+    # Pick the best by final result quality
+    candidates.sort(key=lambda x: x[0])
+    return candidates[0][1]
 
 
 def apply_displacement_to_mesh(vertices, faces, displacements):
