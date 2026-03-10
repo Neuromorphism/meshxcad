@@ -6,11 +6,11 @@
         "enabled": true,
         "params": {
           "center": [
-            0.1555511747493862,
-            0.059588582089510164,
-            3.5421991302763005
+            0.05857079804136807,
+            0.1392504144764555,
+            8.8126287255005
           ],
-          "radius": 1.2459957587932864
+          "radius": 4.091750935595902
         }
       }
     ],
@@ -18,20 +18,20 @@
     "complexity": 1.0
   },
   "initial": {
-    "elegance": 0.8963,
-    "accuracy": 0.8544,
+    "elegance": 0.9011,
+    "accuracy": 0.8783,
     "cad_score": 0.523,
     "n_ops": 1,
     "program": "1 ops: sphere"
   },
   "final": {
-    "elegance": 0.8974,
-    "accuracy": 0.8597,
+    "elegance": 0.9011,
+    "accuracy": 0.8783,
     "cad_score": 0.523,
     "n_ops": 1,
     "program_summary": "1 ops: sphere"
   },
   "converged": true,
-  "total_sweeps": 4,
-  "elapsed_sec": 2.2
+  "total_sweeps": 3,
+  "elapsed_sec": 4.5
 }

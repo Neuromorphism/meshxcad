@@ -366,7 +366,7 @@ class ObjectState:
 # ============================================================================
 
 MIN_IMPROVEMENT_THRESHOLD = 0.002  # ignore changes smaller than this
-ACCURACY_FLOOR = 0.40  # never accept mutations that drop accuracy below this
+ACCURACY_FLOOR = 0.40  # never accept mutations that drop accuracy below this (for high-acc starts)
 
 
 def _joint_score(elegance, cad_score, accuracy):
@@ -416,7 +416,12 @@ def _run_discriminator_pass(state, library, rng, rounds_per_object=5):
             mut_acc = mut_eleg["scores"]["accuracy"]
             mut_joint = _joint_score(mut_eleg["total"], mut_cad, mut_acc)
 
-            acc_floor = max(ACCURACY_FLOOR, state.initial_accuracy - 0.05)
+            # When starting accuracy is already low, don't block
+            # improvements with a hard floor — allow any upward move.
+            if state.initial_accuracy < ACCURACY_FLOOR:
+                acc_floor = max(0.0, state.initial_accuracy - 0.05)
+            else:
+                acc_floor = max(ACCURACY_FLOOR, state.initial_accuracy - 0.05)
             if (mut_joint > best_joint
                     and mut_acc >= acc_floor):
                 best_joint = mut_joint
@@ -477,7 +482,12 @@ def _run_elegance_pass(state, library, rng, rounds_per_object=5):
             mut_acc = mut_eleg["scores"]["accuracy"]
             mut_joint = _joint_score(mut_eleg["total"], mut_cad, mut_acc)
 
-            acc_floor = max(ACCURACY_FLOOR, state.initial_accuracy - 0.05)
+            # When starting accuracy is already low, don't block
+            # improvements with a hard floor — allow any upward move.
+            if state.initial_accuracy < ACCURACY_FLOOR:
+                acc_floor = max(0.0, state.initial_accuracy - 0.05)
+            else:
+                acc_floor = max(ACCURACY_FLOOR, state.initial_accuracy - 0.05)
             if (mut_joint > best_joint
                     and mut_acc >= acc_floor):
                 best_joint = mut_joint

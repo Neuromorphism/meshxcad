@@ -1,12 +1,16 @@
 Model,Accuracy,Elegance,CAD_Score,N_Ops,Program,Sweeps,Converged,Time_s,Target_Verts,CAD_Verts
-dead_tree,0.0000,0.7340,0.5033,1,1 ops: cone,3,True,4.0,622,266
-dead_tree_gnarled,0.8000,0.8769,0.4287,2,2 ops: cylinder → cylinder,4,True,9.2,880,532
-dead_tree_tall,0.7946,0.8464,0.3743,3,3 ops: cylinder → cylinder → torus,4,True,10.6,416,844
-dead_tree_stumpy,0.8014,0.8402,0.4195,2,2 ops: cylinder → torus,4,True,9.0,722,578
-humanoid,0.7719,0.8884,0.5272,1,1 ops: cylinder,3,True,1.2,596,266
-humanoid_stocky,0.8566,0.7730,0.3841,4,4 ops: box → sphere → sphere → sphere,4,True,10.7,596,1356
-humanoid_tall,0.0000,0.7340,0.4992,1,1 ops: cone,3,True,2.8,596,266
-chair,0.6620,0.8664,0.4934,1,1 ops: cylinder,4,True,2.6,132,266
-bottle,0.6505,0.7914,0.4915,1,1 ops: cylinder,3,True,1.4,192,266
-table,0.5042,0.8263,0.5230,1,1 ops: sphere,3,True,2.1,138,420
-rocket,0.8395,0.9019,0.5299,1,1 ops: cylinder,4,True,1.2,284,266
+dead_tree,0.8266,0.8908,0.5230,1,1 ops: sphere,3,True,3.2,622,420
+dead_tree_gnarled,0.8893,0.8631,0.3797,3,3 ops: sphere → box → cylinder,4,True,7.5,880,782
+dead_tree_tall,0.8364,0.8832,0.4304,2,2 ops: cylinder → cylinder,4,True,3.8,416,532
+dead_tree_stumpy,0.8597,0.8974,0.5230,1,1 ops: sphere,4,True,2.2,722,420
+winter_tree,0.8875,0.8898,0.4316,2,2 ops: sphere → cylinder,4,True,11.6,2754,686
+winter_oak,0.8783,0.9011,0.5230,1,1 ops: sphere,3,True,4.5,4950,420
+winter_elm,0.8739,0.8903,0.4459,2,2 ops: sphere → sphere,4,True,12.0,4804,840
+winter_maple,0.9050,0.8967,0.4095,2,2 ops: cylinder → box,4,True,15.8,5548,362
+humanoid,0.8721,0.9084,0.5272,1,1 ops: cylinder,3,True,0.9,596,266
+humanoid_stocky,0.8712,0.9082,0.5277,1,1 ops: cylinder,3,True,0.9,596,266
+humanoid_tall,0.8727,0.9085,0.5268,1,1 ops: cylinder,3,True,0.8,596,266
+chair,0.8164,0.8973,0.4934,1,1 ops: cylinder,4,True,1.2,132,266
+bottle,0.8108,0.8234,0.4915,1,1 ops: cylinder,3,True,0.6,192,266
+table,0.7824,0.8905,0.3906,1,1 ops: cylinder,3,True,1.0,138,266
+rocket,0.9082,0.9156,0.5299,1,1 ops: cylinder,4,True,1.0,284,266

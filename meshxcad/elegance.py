@@ -485,8 +485,10 @@ def score_accuracy(program, target_v, target_f):
     else:
         rel_dist = mean_sym
 
-    # 0 distance → 1.0, larger → decays
-    return max(0.0, 1.0 - rel_dist * 5.0)
+    # Exponential decay: 0 distance → 1.0, larger → decays smoothly
+    # (avoids hard clip to 0.0 that trapped the optimizer)
+    import math as _math
+    return _math.exp(-rel_dist * 3.0)
 
 
 # ============================================================================

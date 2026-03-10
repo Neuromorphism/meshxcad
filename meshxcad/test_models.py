@@ -180,6 +180,183 @@ def make_dead_tree_stumpy(seed=789):
 
 
 # ---------------------------------------------------------------------------
+# Winter tree generation (healthy leafless trees with deep branching)
+# ---------------------------------------------------------------------------
+
+def _grow_branches(rng, parts, start, direction, length, radius,
+                   depth, max_depth, children_range=(2, 4),
+                   spread=0.7, length_decay=0.65, radius_decay=0.55,
+                   n_angular=8):
+    """Recursively grow branches to build a large canopy structure.
+
+    Parameters
+    ----------
+    depth : current recursion depth (0 = primary branches off trunk)
+    max_depth : stop recursing beyond this depth
+    children_range : (min, max) number of child branches per parent
+    spread : controls how wide child branches splay outward (radians)
+    length_decay : child length as fraction of parent length
+    radius_decay : child radius as fraction of parent radius
+    """
+    d = np.asarray(direction, dtype=np.float64)
+    d = d / max(np.linalg.norm(d), 1e-12)
+
+    # Reduce angular segments for finer branches
+    seg = max(n_angular - depth * 2, 4)
+
+    branch = _branch_mesh(
+        start=start, direction=d,
+        length=length,
+        radius_start=radius, radius_end=radius * 0.65,
+        n_angular=seg, n_height=max(4 - depth, 2),
+    )
+    parts.append(branch)
+
+    if depth >= max_depth:
+        return
+
+    n_children = rng.randint(children_range[0], children_range[1] + 1)
+    for ci in range(n_children):
+        # Place child along parent (30%-90% of the way up)
+        t = 0.3 + 0.6 * (ci / max(n_children - 1, 1))
+        child_start = np.asarray(start) + d * length * t
+
+        # Child direction: parent direction + random perturbation
+        perturb_angle = rng.uniform(0, 2 * math.pi)
+        perturb_elev = rng.uniform(0.3, spread)
+
+        # Build a local frame from parent direction
+        if abs(d[2]) < 0.9:
+            ref = np.array([0.0, 0.0, 1.0])
+        else:
+            ref = np.array([1.0, 0.0, 0.0])
+        u = np.cross(d, ref)
+        u = u / max(np.linalg.norm(u), 1e-12)
+        v = np.cross(d, u)
+        v = v / max(np.linalg.norm(v), 1e-12)
+
+        child_d = (d * math.cos(perturb_elev)
+                   + u * math.sin(perturb_elev) * math.cos(perturb_angle)
+                   + v * math.sin(perturb_elev) * math.sin(perturb_angle))
+
+        # Bias upward slightly for healthy growth
+        child_d[2] = max(child_d[2], 0.15)
+        child_d = child_d / max(np.linalg.norm(child_d), 1e-12)
+
+        child_length = length * length_decay * rng.uniform(0.8, 1.2)
+        child_radius = radius * radius_decay * rng.uniform(0.8, 1.2)
+
+        if child_radius < 0.01 or child_length < 0.05:
+            continue
+
+        _grow_branches(
+            rng, parts, child_start, child_d,
+            child_length, child_radius,
+            depth + 1, max_depth,
+            children_range=children_range,
+            spread=spread,
+            length_decay=length_decay,
+            radius_decay=radius_decay,
+            n_angular=n_angular,
+        )
+
+
+def make_winter_tree(trunk_height=12.0, trunk_radius=0.9,
+                     n_primary=5, max_depth=3,
+                     children_range=(2, 3), spread=0.7, seed=100):
+    """Generate a healthy leafless winter tree with deep recursive branching.
+
+    Returns (vertices, faces) numpy arrays.
+    """
+    rng = np.random.RandomState(seed)
+    parts = []
+
+    # Trunk — healthy taper
+    trunk = _branch_mesh(
+        start=[0, 0, 0],
+        direction=[0, 0, 1],
+        length=trunk_height,
+        radius_start=trunk_radius,
+        radius_end=trunk_radius * 0.5,
+        n_angular=12,
+        n_height=10,
+    )
+    parts.append(trunk)
+
+    # Primary branches distributed around the trunk
+    for i in range(n_primary):
+        t = 0.35 + 0.55 * (i / max(n_primary - 1, 1))
+        branch_start = np.array([0.0, 0.0, trunk_height * t])
+
+        angle = 2 * math.pi * i / n_primary + rng.uniform(-0.3, 0.3)
+        elev = rng.uniform(0.3, 0.7)
+        dx = math.cos(angle) * math.cos(elev)
+        dy = math.sin(angle) * math.cos(elev)
+        dz = math.sin(elev)
+        direction = np.array([dx, dy, dz])
+
+        branch_length = trunk_height * rng.uniform(0.3, 0.5)
+        branch_radius = trunk_radius * rng.uniform(0.25, 0.4)
+
+        _grow_branches(
+            rng, parts, branch_start, direction,
+            branch_length, branch_radius,
+            depth=0, max_depth=max_depth,
+            children_range=children_range,
+            spread=spread,
+        )
+
+    # Crown branches from the very top
+    crown_start = np.array([0.0, 0.0, trunk_height * 0.95])
+    for i in range(3):
+        angle = 2 * math.pi * i / 3 + rng.uniform(-0.4, 0.4)
+        dx = math.cos(angle) * 0.3
+        dy = math.sin(angle) * 0.3
+        direction = np.array([dx, dy, 0.9])
+        direction = direction / np.linalg.norm(direction)
+
+        _grow_branches(
+            rng, parts, crown_start, direction,
+            trunk_height * 0.25, trunk_radius * 0.3,
+            depth=0, max_depth=max_depth - 1,
+            children_range=children_range,
+            spread=spread * 0.8,
+        )
+
+    return combine_meshes(parts)
+
+
+def make_winter_oak(seed=101):
+    """A broad winter oak with wide spreading branches."""
+    return make_winter_tree(
+        trunk_height=10.0, trunk_radius=1.2,
+        n_primary=6, max_depth=3,
+        children_range=(2, 4), spread=0.8,
+        seed=seed,
+    )
+
+
+def make_winter_elm(seed=102):
+    """A tall winter elm with vase-shaped branching."""
+    return make_winter_tree(
+        trunk_height=14.0, trunk_radius=0.7,
+        n_primary=4, max_depth=4,
+        children_range=(2, 3), spread=0.55,
+        seed=seed,
+    )
+
+
+def make_winter_maple(seed=103):
+    """A winter maple with dense, rounded branching structure."""
+    return make_winter_tree(
+        trunk_height=11.0, trunk_radius=0.85,
+        n_primary=5, max_depth=3,
+        children_range=(3, 4), spread=0.65,
+        seed=seed,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Humanoid generation
 # ---------------------------------------------------------------------------
 
@@ -454,6 +631,10 @@ ALL_TEST_MODELS = {
     "dead_tree_gnarled": make_dead_tree_gnarled,
     "dead_tree_tall": make_dead_tree_tall,
     "dead_tree_stumpy": make_dead_tree_stumpy,
+    "winter_tree": make_winter_tree,
+    "winter_oak": make_winter_oak,
+    "winter_elm": make_winter_elm,
+    "winter_maple": make_winter_maple,
     "humanoid": make_humanoid,
     "humanoid_stocky": make_humanoid_stocky,
     "humanoid_tall": make_humanoid_tall,

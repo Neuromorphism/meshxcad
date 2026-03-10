@@ -2,38 +2,36 @@
   "program": {
     "operations": [
       {
-        "op_type": "cone",
+        "op_type": "sphere",
         "enabled": true,
         "params": {
           "center": [
-            5.850761814696768,
-            7.374825954850454,
-            -15.658450549810285
+            -0.030566818615340226,
+            -0.23332802925381277,
+            7.375022209740194
           ],
-          "base_radius": 2.1804835254302777,
-          "top_radius": 1.2935548409713986,
-          "height": 12.17486084516532
+          "radius": 2.7961924641161406
         }
       }
     ],
     "n_ops": 1,
-    "complexity": 1.5
+    "complexity": 1.0
   },
   "initial": {
-    "elegance": 0.734,
-    "accuracy": 0.0,
-    "cad_score": 0.5033,
+    "elegance": 0.8908,
+    "accuracy": 0.8266,
+    "cad_score": 0.523,
     "n_ops": 1,
-    "program": "1 ops: cone"
+    "program": "1 ops: sphere"
   },
   "final": {
-    "elegance": 0.734,
-    "accuracy": 0.0,
-    "cad_score": 0.5033,
+    "elegance": 0.8908,
+    "accuracy": 0.8266,
+    "cad_score": 0.523,
     "n_ops": 1,
-    "program_summary": "1 ops: cone"
+    "program_summary": "1 ops: sphere"
   },
   "converged": true,
   "total_sweeps": 3,
-  "elapsed_sec": 2.7
+  "elapsed_sec": 2.1
 }

@@ -24,20 +24,20 @@
     "complexity": 1.0
   },
   "initial": {
-    "elegance": 0.7914,
-    "accuracy": 0.6505,
+    "elegance": 0.8234,
+    "accuracy": 0.8108,
     "cad_score": 0.4915,
     "n_ops": 1,
     "program": "1 ops: cylinder"
   },
   "final": {
-    "elegance": 0.7914,
-    "accuracy": 0.6505,
+    "elegance": 0.8234,
+    "accuracy": 0.8108,
     "cad_score": 0.4915,
     "n_ops": 1,
     "program_summary": "1 ops: cylinder"
   },
   "converged": true,
   "total_sweeps": 3,
-  "elapsed_sec": 1.4
+  "elapsed_sec": 0.6
 }

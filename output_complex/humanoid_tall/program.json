@@ -2,38 +2,42 @@
   "program": {
     "operations": [
       {
-        "op_type": "cone",
+        "op_type": "cylinder",
         "enabled": true,
         "params": {
           "center": [
-            5.76726913995417e-16,
-            0.06865161161309892,
-            -2.4827816344762983
+            3.184315674654427e-17,
+            0.007941559229506519,
+            0.9228617684712802
           ],
-          "base_radius": 0.29664102816706084,
-          "top_radius": 0.169705685244235,
+          "axis": [
+            -1.599689508188351e-16,
+            -0.017823477493611573,
+            0.9998411492082305
+          ],
+          "radius": 0.18395872572238853,
           "height": 1.8542650021775064
         }
       }
     ],
     "n_ops": 1,
-    "complexity": 1.5
+    "complexity": 1.0
   },
   "initial": {
-    "elegance": 0.734,
-    "accuracy": 0.0,
-    "cad_score": 0.4992,
+    "elegance": 0.9085,
+    "accuracy": 0.8727,
+    "cad_score": 0.5268,
     "n_ops": 1,
-    "program": "1 ops: cone"
+    "program": "1 ops: cylinder"
   },
   "final": {
-    "elegance": 0.734,
-    "accuracy": 0.0,
-    "cad_score": 0.4992,
+    "elegance": 0.9085,
+    "accuracy": 0.8727,
+    "cad_score": 0.5268,
     "n_ops": 1,
-    "program_summary": "1 ops: cone"
+    "program_summary": "1 ops: cylinder"
   },
   "converged": true,
   "total_sweeps": 3,
-  "elapsed_sec": 2.8
+  "elapsed_sec": 0.8
 }

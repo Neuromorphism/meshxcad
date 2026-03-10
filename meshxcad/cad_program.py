@@ -665,71 +665,71 @@ def simplify_program(program, target_v, target_f):
 # Initial program construction
 # ---------------------------------------------------------------------------
 
-def initial_program(target_v, target_f):
-    """Create a 1-operation CadProgram from mesh classification."""
-    target_v = np.asarray(target_v, dtype=np.float64)
-    target_f = np.asarray(target_f)
-
-    classification = classify_mesh(target_v, target_f)
-    shape = classification["shape_type"]
-
+def _make_candidate_op(shape, target_v):
+    """Build a CadOp for a given shape type fitted to the target vertices."""
     if shape == "sphere":
         params = fit_sphere(target_v)
-        op = CadOp("sphere", {
+        return CadOp("sphere", {
             "center": params["center"].tolist(),
             "radius": params["radius"],
         })
-
     elif shape == "cylinder":
         params = fit_cylinder(target_v)
-        op = CadOp("cylinder", {
+        return CadOp("cylinder", {
             "center": params["center"].tolist(),
             "axis": params["axis"].tolist(),
             "radius": params["radius"],
             "height": params["height"],
         })
-
     elif shape == "cone":
         params = fit_cone(target_v)
-        op = CadOp("cone", {
+        return CadOp("cone", {
             "center": params["apex"].tolist(),
             "base_radius": params["base_radius"],
             "top_radius": max(params["top_radius"], 0.01),
             "height": params["height"],
         })
-
     elif shape == "box":
         params = fit_box(target_v)
-        op = CadOp("box", {
+        return CadOp("box", {
             "center": params["center"].tolist(),
             "dimensions": params["dimensions"].tolist(),
         })
+    return None
 
-    elif shape in ("revolve", "extrude", "sweep", "freeform"):
-        # Start with the best-fit primitive and let the loop refine
-        sphere = fit_sphere(target_v)
-        cyl = fit_cylinder(target_v)
-        # Pick whichever has lower residual
-        if cyl["residual"] < sphere["residual"]:
-            op = CadOp("cylinder", {
-                "center": cyl["center"].tolist(),
-                "axis": cyl["axis"].tolist(),
-                "radius": cyl["radius"],
-                "height": cyl["height"],
-            })
-        else:
-            op = CadOp("sphere", {
-                "center": sphere["center"].tolist(),
-                "radius": sphere["radius"],
-            })
-    else:
-        sphere = fit_sphere(target_v)
-        op = CadOp("sphere", {
-            "center": sphere["center"].tolist(),
-            "radius": sphere["radius"],
-        })
 
-    return CadProgram([op])
+def initial_program(target_v, target_f):
+    """Create a 1-operation CadProgram from mesh classification.
+
+    Tries all four primitive types (sphere, cylinder, cone, box) and
+    picks the one with the best accuracy score, so complex meshes
+    don't get stuck with a fundamentally wrong starting shape.
+    """
+    from .elegance import score_accuracy
+
+    target_v = np.asarray(target_v, dtype=np.float64)
+    target_f = np.asarray(target_f)
+
+    # Try all four primitives and pick the best
+    candidates = []
+    for shape in ("sphere", "cylinder", "cone", "box"):
+        try:
+            op = _make_candidate_op(shape, target_v)
+            if op is not None:
+                prog = CadProgram([op])
+                acc = score_accuracy(prog, target_v, target_f)
+                candidates.append((acc, shape, prog))
+        except Exception:
+            pass
+
+    if not candidates:
+        # Fallback to sphere
+        op = _make_candidate_op("sphere", target_v)
+        return CadProgram([op])
+
+    # Sort by accuracy descending, pick the best
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    return candidates[0][2]
 
 
 # ---------------------------------------------------------------------------
