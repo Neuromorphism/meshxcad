@@ -6,17 +6,37 @@
         "enabled": true,
         "params": {
           "center": [
-            -4.4768495732739095e-18,
-            -1.9868867984488438e-17,
-            0.48939339828220174
+            -7.182363865447834e-18,
+            -6.573688961596321e-18,
+            0.35
           ],
           "axis": [
             0.0,
-            -2.220446049250313e-16,
+            -2.7755575615628914e-17,
             1.0
           ],
-          "radius": 0.1,
-          "height": 0.9701525432638164
+          "radius": 0.10208072577796046,
+          "height": 0.6664409146007062,
+          "h_divs": 6.281945911297196
+        }
+      },
+      {
+        "op_type": "cylinder",
+        "enabled": true,
+        "params": {
+          "center": [
+            -2.087089182034596e-18,
+            -2.4632544479760312e-18,
+            0.85
+          ],
+          "axis": [
+            0.0,
+            6.661338147750939e-16,
+            1.0000000000000002
+          ],
+          "radius": 0.03118375,
+          "height": 0.30000000000000016,
+          "h_divs": 4
         }
       },
       {
@@ -33,8 +53,10 @@
             0.0,
             0.7071067811865478
           ],
-          "radius": 0.026362499999999997,
-          "height": 0.21213203435596428
+          "radius": 0.027749999999999997,
+          "height": 0.21213203435596428,
+          "divs": 4,
+          "h_divs": 4
         }
       },
       {
@@ -51,8 +73,10 @@
             0.7071067811865478,
             0.7071067811865476
           ],
-          "radius": 0.026362499999999997,
-          "height": 0.2121320343559643
+          "radius": 0.027749999999999997,
+          "height": 0.2121320343559643,
+          "divs": 4,
+          "h_divs": 4
         }
       },
       {
@@ -69,30 +93,52 @@
             2.220446049250313e-16,
             0.7071067811865477
           ],
-          "radius": 0.026362499999999997,
-          "height": 0.21213203435596428
+          "radius": 0.027749999999999997,
+          "height": 0.21213203435596428,
+          "divs": 4,
+          "h_divs": 4
+        }
+      },
+      {
+        "op_type": "cylinder",
+        "enabled": true,
+        "params": {
+          "center": [
+            -3.129809958552651e-17,
+            -0.175,
+            0.07500000000000001
+          ],
+          "axis": [
+            -1.340848456020544e-16,
+            -0.7071067811865475,
+            0.7071067811865478
+          ],
+          "radius": 0.027749999999999997,
+          "height": 0.2121320343559643,
+          "divs": 4,
+          "h_divs": 4
         }
       }
     ],
-    "n_ops": 4,
-    "complexity": 4.0
+    "n_ops": 6,
+    "complexity": 6.0
   },
   "initial": {
-    "elegance": 0.8702,
-    "accuracy": 0.8986,
-    "cad_score": 0.5251,
-    "n_ops": 1,
-    "program": "1 ops: cylinder"
+    "elegance": 0.7341,
+    "accuracy": 0.9765,
+    "cad_score": 0.4413,
+    "n_ops": 6,
+    "program": "6 ops: cylinder \u2192 cylinder \u2192 cylinder \u2192 cylinder \u2192 cylinder \u2192 cylinder"
   },
   "final": {
-    "elegance": 0.7979,
-    "accuracy": 0.943,
-    "cad_score": 0.3586,
-    "n_ops": 4,
-    "program_summary": "4 ops: cylinder \u2192 cylinder \u2192 cylinder \u2192 cylinder"
+    "elegance": 0.7607,
+    "accuracy": 0.9703,
+    "cad_score": 0.4255,
+    "n_ops": 6,
+    "program_summary": "6 ops: cylinder \u2192 cylinder \u2192 cylinder \u2192 cylinder \u2192 cylinder \u2192 cylinder"
   },
-  "feature_fidelity": 0.8534,
+  "feature_fidelity": 0.9564,
   "converged": true,
-  "total_sweeps": 4,
-  "elapsed_sec": 7.5
+  "total_sweeps": 7,
+  "elapsed_sec": 3.7
 }

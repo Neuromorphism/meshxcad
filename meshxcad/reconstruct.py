@@ -66,49 +66,156 @@ def fit_sphere(vertices):
     return {"center": center, "radius": radius, "residual": residual}
 
 
-def fit_cylinder(vertices):
-    """Fit a cylinder to a point cloud (axis via PCA, radius via median).
-
-    Args:
-        vertices: (N, 3) array
-
-    Returns:
-        dict with center (3,), axis (3,), radius, height, residual
-    """
-    v = np.asarray(vertices, dtype=np.float64)
-    center = v.mean(axis=0)
-    centered = v - center
-
-    # PCA for axis
-    cov = centered.T @ centered / len(v)
-    eigvals, eigvecs = np.linalg.eigh(cov)
-    order = np.argsort(eigvals)[::-1]
-    eigvecs = eigvecs[:, order]
-    axis = eigvecs[:, 0]
+def _fit_cylinder_along_axis(vertices, center, centered, axis):
+    """Fit cylinder parameters along a given axis direction."""
     if axis[2] < 0:
         axis = -axis
 
-    # Project onto axis for height
     proj = centered @ axis
     height = float(proj.max() - proj.min())
 
-    # Radial distance perpendicular to axis
     radial = centered - np.outer(proj, axis)
     radii = np.linalg.norm(radial, axis=1)
     radius = float(np.median(radii))
     residual = float(np.mean(np.abs(radii - radius)))
 
-    # Axis base point (bottom of cylinder)
     base = center + axis * float(proj.min())
 
     return {
         "center": base + axis * height / 2,
-        "axis": axis,
+        "axis": axis.copy(),
         "radius": radius,
         "height": height,
         "base": base,
         "residual": residual,
     }
+
+
+def fit_cylinder(vertices):
+    """Fit a cylinder to a point cloud.
+
+    Tries all 3 PCA axes and picks the one with the lowest residual.
+    This handles both elongated shapes (axis = longest direction) and
+    flat disc-like shapes (axis = shortest direction).
+
+    Args:
+        vertices: (N, 3) array
+
+    Returns:
+        dict with center (3,), axis (3,), radius, height, residual,
+        and optionally best_divs (int) if cross-section is polygonal.
+    """
+    v = np.asarray(vertices, dtype=np.float64)
+    center = v.mean(axis=0)
+    centered = v - center
+
+    # PCA for candidate axes
+    cov = centered.T @ centered / len(v)
+    eigvals, eigvecs = np.linalg.eigh(cov)
+    order = np.argsort(eigvals)[::-1]
+    eigvecs = eigvecs[:, order]
+
+    # Try all 3 principal axes and pick the best fit
+    best = None
+    for i in range(3):
+        axis = eigvecs[:, i].copy()
+        result = _fit_cylinder_along_axis(v, center, centered, axis)
+        if best is None or result["residual"] < best["residual"]:
+            best = result
+
+    # Detect cross-section shape (polygonal vs circular)
+    best_divs = _detect_cross_section_divs(v, best["axis"], best["center"])
+    if best_divs is not None:
+        best["best_divs"] = best_divs
+
+    return best
+
+
+def _detect_cross_section_divs(vertices, axis, center):
+    """Detect if cross-section is polygonal and return best divs count.
+
+    Counts the number of unique angular positions around the cylinder axis.
+    If points cluster at N evenly-spaced angles, the cross-section is an
+    N-sided polygon.  Works with low-poly meshes (as few as 10 vertices).
+
+    Args:
+        vertices: (N, 3) point cloud
+        axis: (3,) cylinder axis direction
+        center: (3,) cylinder center
+
+    Returns:
+        int or None: best divs count (4 for square, 6 for hex, etc.)
+    """
+    v = np.asarray(vertices, dtype=np.float64)
+    axis = axis / (np.linalg.norm(axis) + 1e-12)
+
+    # Project to get radial vectors
+    rel = v - center
+    proj = np.dot(rel, axis)
+    radial = rel - np.outer(proj, axis)
+    radial_dists = np.linalg.norm(radial, axis=1)
+
+    # Filter out points on/near the axis (endcap centers, etc.)
+    median_r = np.median(radial_dists)
+    if median_r < 1e-8:
+        return None
+    mask = radial_dists > median_r * 0.3
+    if np.sum(mask) < 6:
+        return None
+
+    radial_filtered = radial[mask]
+    radial_dists_filtered = radial_dists[mask]
+
+    # Build a local 2D coordinate system perpendicular to axis
+    ref = np.array([1.0, 0.0, 0.0])
+    if abs(np.dot(ref, axis)) > 0.9:
+        ref = np.array([0.0, 1.0, 0.0])
+    u = ref - np.dot(ref, axis) * axis
+    u = u / (np.linalg.norm(u) + 1e-12)
+    w = np.cross(axis, u)
+
+    # Compute angles
+    cos_a = np.dot(radial_filtered, u) / (radial_dists_filtered + 1e-12)
+    sin_a = np.dot(radial_filtered, w) / (radial_dists_filtered + 1e-12)
+    angles = np.arctan2(sin_a, cos_a)
+
+    # Count unique angular positions (cluster nearby angles)
+    sorted_angles = np.sort(angles)
+    # Cluster angles within a small tolerance
+    tol = 0.15  # ~8.5 degrees
+    unique_angles = [sorted_angles[0]]
+    for a in sorted_angles[1:]:
+        if a - unique_angles[-1] > tol:
+            unique_angles.append(a)
+    # Check wrap-around
+    if len(unique_angles) > 1:
+        if (unique_angles[0] + 2 * np.pi - unique_angles[-1]) < tol:
+            unique_angles.pop()
+
+    n_unique = len(unique_angles)
+
+    # Check if the unique angles are evenly spaced
+    if n_unique < 3 or n_unique > 12:
+        return None
+
+    # For evenly-spaced detection, check angular gaps
+    gaps = []
+    for i in range(len(unique_angles) - 1):
+        gaps.append(unique_angles[i + 1] - unique_angles[i])
+    gaps.append(unique_angles[0] + 2 * np.pi - unique_angles[-1])
+
+    expected_gap = 2 * np.pi / n_unique
+    gap_errors = [abs(g - expected_gap) / expected_gap for g in gaps]
+    mean_gap_error = np.mean(gap_errors)
+
+    # If angles are evenly spaced (within 15% tolerance), it's a polygon
+    if mean_gap_error < 0.15:
+        # Match to standard polygon counts
+        for n_sides in [3, 4, 5, 6, 8, 10, 12]:
+            if n_unique == n_sides:
+                return n_sides
+
+    return None
 
 
 def fit_cone(vertices):

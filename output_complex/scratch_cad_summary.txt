@@ -1,16 +1,16 @@
 Model,Accuracy,Feature_Fidelity,Elegance,CAD_Score,N_Ops,Program,Sweeps,Converged,Time_s,Target_Verts,CAD_Verts
-dead_tree,0.9035,0.7972,0.7527,0.3511,4,4 ops: sphere → cylinder → cylinder → cylinder,4,True,10.6,622,1218
-dead_tree_gnarled,0.8766,0.7447,0.8486,0.3614,3,3 ops: sphere → box → cylinder,4,True,16.7,880,782
-dead_tree_tall,0.9412,0.9268,0.7892,0.3287,5,5 ops: cylinder → cylinder → cylinder → cylinder → box,4,True,15.5,416,1160
-dead_tree_stumpy,0.9017,0.6982,0.7716,0.3550,4,4 ops: sphere → cylinder → cylinder → cylinder,4,True,9.9,722,1218
-winter_tree,0.8998,0.7334,0.8605,0.4209,3,3 ops: sphere → cylinder → cylinder,5,True,36.0,2754,952
-winter_oak,0.8976,0.7703,0.8486,0.4420,2,2 ops: sphere → cylinder,4,True,28.2,4950,686
-winter_elm,0.9091,0.8060,0.8452,0.3675,4,4 ops: sphere → box → box → torus,4,True,28.1,4804,924
-winter_maple,0.9116,0.9230,0.8642,0.3712,3,3 ops: cylinder → cylinder → torus,4,True,16.7,5548,844
-humanoid,0.9109,0.7384,0.8315,0.3748,2,2 ops: cylinder → cylinder,4,True,11.4,596,532
-humanoid_stocky,0.9073,0.7288,0.8299,0.3747,2,2 ops: cylinder → cylinder,4,True,9.1,596,532
-humanoid_tall,0.9319,0.8524,0.8407,0.3654,3,3 ops: cylinder → cylinder → box,6,True,7.9,596,628
-chair,0.8164,0.6478,0.8697,0.4934,1,1 ops: cylinder,4,True,4.8,132,266
-bottle,0.8108,0.8000,0.8203,0.4915,1,1 ops: cylinder,3,True,0.6,192,266
-table,0.7824,0.6018,0.8590,0.3906,1,1 ops: cylinder,3,True,3.7,138,266
-rocket,0.9430,0.8534,0.7979,0.3586,4,4 ops: cylinder → cylinder → cylinder → cylinder,4,True,7.5,284,1064
+dead_tree,0.9927,0.9511,0.6883,0.4154,17,17 ops: cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder,3,True,2.8,622,622
+dead_tree_gnarled,0.9894,0.9646,0.7161,0.4150,26,26 ops: cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder,3,True,5.9,880,880
+dead_tree_tall,0.9957,0.9576,0.7307,0.4081,10,10 ops: cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder,3,True,1.5,416,416
+dead_tree_stumpy,0.9728,0.9589,0.6896,0.4170,19,19 ops: cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder,3,True,3.4,722,722
+winter_tree,0.9765,0.8894,0.6508,0.4261,30,30 ops: cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder,4,True,23.0,2754,1004
+winter_oak,0.9600,0.9697,0.6472,0.4168,30,30 ops: cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder,4,True,23.7,4950,1080
+winter_elm,0.9556,0.9792,0.6334,0.4104,30,30 ops: cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder,4,True,25.3,4804,630
+winter_maple,0.9640,0.9904,0.6539,0.4177,30,30 ops: cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder,4,True,30.1,5548,1016
+humanoid,0.9901,0.9450,0.7351,0.4167,13,13 ops: sphere → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder,3,True,3.1,596,908
+humanoid_stocky,0.9906,0.9476,0.7354,0.4167,13,13 ops: sphere → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder,3,True,3.4,596,908
+humanoid_tall,0.9898,0.9434,0.7349,0.4167,13,13 ops: sphere → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder,3,True,3.3,596,908
+chair,0.9778,0.9391,0.7262,0.4303,6,6 ops: cylinder → cylinder → cylinder → cylinder → cylinder → cylinder,3,True,0.6,132,136
+bottle,0.9721,0.8000,0.6942,0.3077,7,7 ops: cylinder → cylinder → cylinder → cylinder → cylinder → cylinder → cylinder,4,True,5.1,192,518
+table,0.9723,0.9849,0.7265,0.4328,5,5 ops: cylinder → cylinder → cylinder → cylinder → cylinder,3,True,0.4,138,142
+rocket,0.9703,0.9564,0.7607,0.4255,6,6 ops: cylinder → cylinder → cylinder → cylinder → cylinder → cylinder,7,True,3.7,284,380

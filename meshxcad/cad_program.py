@@ -214,8 +214,8 @@ def _eval_op(op, existing_meshes):
     if t == "sphere":
         v, f = make_sphere_mesh(
             radius=p.get("radius", 1.0),
-            lat_divs=p.get("divs", 20),
-            lon_divs=p.get("divs", 20))
+            lat_divs=int(p.get("divs", 20)),
+            lon_divs=int(p.get("divs", 20)))
         center = np.asarray(p.get("center", [0, 0, 0]), dtype=np.float64)
         return v + center, f
 
@@ -223,8 +223,8 @@ def _eval_op(op, existing_meshes):
         v, f = make_cylinder_mesh(
             radius=p.get("radius", 1.0),
             height=p.get("height", 1.0),
-            radial_divs=p.get("divs", 24),
-            height_divs=p.get("h_divs", 10))
+            radial_divs=int(p.get("divs", 24)),
+            height_divs=int(p.get("h_divs", 10)))
         axis = np.asarray(p.get("axis", [0, 0, 1]), dtype=np.float64)
         center = np.asarray(p.get("center", [0, 0, 0]), dtype=np.float64)
         # Align to axis
@@ -238,11 +238,11 @@ def _eval_op(op, existing_meshes):
         h = p.get("height", 1.0)
         base_r = p.get("base_radius", 1.0)
         top_r = p.get("top_radius", 0.1)
-        n_h = p.get("h_divs", 10)
+        n_h = int(p.get("h_divs", 10))
         profile = [(base_r + (top_r - base_r) * i / n_h,
                      i / n_h * h) for i in range(n_h + 1)]
         profile = [(max(r, 0.01), z) for r, z in profile]
-        v, f = revolve_profile(profile, p.get("divs", 24))
+        v, f = revolve_profile(profile, int(p.get("divs", 24)))
         center = np.asarray(p.get("center", [0, 0, 0]), dtype=np.float64)
         return v + center, f
 
@@ -265,7 +265,7 @@ def _eval_op(op, existing_meshes):
 
     if t == "revolve":
         profile = p.get("profile", [(1, 0), (1, 1)])
-        v, f = revolve_profile(profile, p.get("divs", 24))
+        v, f = revolve_profile(profile, int(p.get("divs", 24)))
         center = np.asarray(p.get("center", [0, 0, 0]), dtype=np.float64)
         return v + center, f
 
@@ -568,7 +568,9 @@ def add_operation(program, gap):
 def refine_operation(program, op_index, target_v, target_f, max_iter=30):
     """Refine an operation's numeric parameters to reduce distance.
 
-    Uses coordinate-descent on each parameter.
+    Uses multi-scale coordinate descent: starts with large perturbations
+    (±50%) to escape bad initial fits (e.g. wrong radius), then narrows
+    to fine adjustments.  Runs multiple passes for max_iter iterations.
     """
     if op_index < 0 or op_index >= len(program.operations):
         return
@@ -577,37 +579,56 @@ def refine_operation(program, op_index, target_v, target_f, max_iter=30):
     original_params = copy.deepcopy(op.params)
     best_cost = program.total_cost(target_v, target_f)
 
-    # Try perturbing each numeric parameter
-    for key, val in list(original_params.items()):
-        if isinstance(val, (int, float)):
-            for delta_frac in [0.1, -0.1, 0.05, -0.05, 0.2, -0.2]:
-                trial = val * (1.0 + delta_frac)
-                if isinstance(val, int):
-                    trial = int(round(trial))
-                op.params[key] = trial
-                program.invalidate_cache()
-                cost = program.total_cost(target_v, target_f)
-                if cost < best_cost:
-                    best_cost = cost
-                    original_params[key] = trial
-                else:
-                    op.params[key] = original_params[key]
-                    program.invalidate_cache()
+    # Multi-scale: coarse → fine delta fractions
+    scalar_deltas = [0.5, -0.5, 0.3, -0.3, 0.15, -0.15, 0.05, -0.05]
+    vector_deltas = [1.0, -1.0, 0.5, -0.5, 0.2, -0.2, 0.05, -0.05]
 
-        elif isinstance(val, list) and all(isinstance(x, (int, float)) for x in val):
-            for i in range(len(val)):
-                for delta in [0.1, -0.1, 0.3, -0.3]:
-                    trial_val = list(original_params[key])
-                    trial_val[i] += delta * abs(trial_val[i]) if abs(trial_val[i]) > 0.01 else delta
-                    op.params[key] = trial_val
+    # Skip discrete parameters that shouldn't be continuously refined
+    skip_keys = {"divs", "h_divs", "subdivs", "cross_divs"}
+
+    for iteration in range(max_iter):
+        improved_any = False
+
+        for key, val in list(original_params.items()):
+            if key in skip_keys:
+                continue
+            if isinstance(val, (int, float)):
+                for delta_frac in scalar_deltas:
+                    trial = val * (1.0 + delta_frac)
+                    if isinstance(val, int):
+                        trial = int(round(trial))
+                    op.params[key] = trial
                     program.invalidate_cache()
                     cost = program.total_cost(target_v, target_f)
                     if cost < best_cost:
                         best_cost = cost
-                        original_params[key] = list(trial_val)
+                        original_params[key] = trial
+                        val = trial  # update for next delta
+                        improved_any = True
                     else:
-                        op.params[key] = list(original_params[key])
+                        op.params[key] = original_params[key]
                         program.invalidate_cache()
+
+            elif isinstance(val, list) and all(
+                    isinstance(x, (int, float)) for x in val):
+                for i in range(len(val)):
+                    for delta in vector_deltas:
+                        trial_val = list(original_params[key])
+                        scale = abs(trial_val[i]) if abs(trial_val[i]) > 0.01 else 1.0
+                        trial_val[i] += delta * scale
+                        op.params[key] = trial_val
+                        program.invalidate_cache()
+                        cost = program.total_cost(target_v, target_f)
+                        if cost < best_cost:
+                            best_cost = cost
+                            original_params[key] = list(trial_val)
+                            improved_any = True
+                        else:
+                            op.params[key] = list(original_params[key])
+                            program.invalidate_cache()
+
+        if not improved_any:
+            break
 
 
 def remove_operation(program, op_index):
@@ -675,16 +696,36 @@ def _make_candidate_op(shape, target_v):
         })
     elif shape == "cylinder":
         params = fit_cylinder(target_v)
-        return CadOp("cylinder", {
+        op_params = {
             "center": params["center"].tolist(),
             "axis": params["axis"].tolist(),
             "radius": params["radius"],
             "height": params["height"],
-        })
+        }
+        # Use detected cross-section divs if available
+        if "best_divs" in params:
+            op_params["divs"] = params["best_divs"]
+        # Estimate height subdivisions from target vertex density
+        h_divs = _estimate_height_divs(target_v, params["axis"],
+                                        params["center"], params["height"])
+        if h_divs is not None:
+            op_params["h_divs"] = h_divs
+        return CadOp("cylinder", op_params)
     elif shape == "cone":
         params = fit_cone(target_v)
+        # Center is the base of the cone, not the apex
+        # The cone profile goes from z=0 (base_radius) to z=height (top_radius)
+        axis = params["axis"]
+        apex = params["apex"]
+        h = params["height"]
+        # Base is at apex - axis * (height * slope_direction)
+        # Simpler: compute base from target vertices along the axis
+        tv = np.asarray(target_v, dtype=np.float64)
+        center = tv.mean(axis=0)
+        proj = np.dot(tv - center, axis)
+        base_pos = center + axis * float(proj.min())
         return CadOp("cone", {
-            "center": params["apex"].tolist(),
+            "center": base_pos.tolist(),
             "base_radius": params["base_radius"],
             "top_radius": max(params["top_radius"], 0.01),
             "height": params["height"],
@@ -698,19 +739,236 @@ def _make_candidate_op(shape, target_v):
     return None
 
 
-def initial_program(target_v, target_f):
-    """Create a 1-operation CadProgram from mesh classification.
+def _estimate_height_divs(vertices, axis, center, height):
+    """Estimate number of height subdivisions from vertex height distribution.
 
-    Tries all four primitive types (sphere, cylinder, cone, box) and
-    picks the one with the best accuracy score, so complex meshes
-    don't get stuck with a fundamentally wrong starting shape.
+    For low-poly meshes, the vertices are arranged at discrete height levels.
+    We detect these levels and return the number of gaps between them.
+
+    Returns:
+        int or None: estimated h_divs, or None if can't determine
+    """
+    v = np.asarray(vertices, dtype=np.float64)
+    axis = np.asarray(axis, dtype=np.float64)
+    axis = axis / (np.linalg.norm(axis) + 1e-12)
+    center = np.asarray(center, dtype=np.float64)
+
+    # Project onto axis
+    proj = np.dot(v - center, axis)
+
+    if height < 1e-8:
+        return None
+
+    # Cluster unique height levels (relative to height)
+    tol = height * 0.05  # 5% of height
+    sorted_proj = np.sort(proj)
+    levels = [sorted_proj[0]]
+    for p in sorted_proj[1:]:
+        if p - levels[-1] > tol:
+            levels.append(p)
+
+    n_levels = len(levels)
+    if n_levels < 2 or n_levels > 20:
+        return None
+
+    # h_divs = number of gaps between levels
+    h_divs = n_levels - 1
+    return max(2, h_divs)
+
+
+def initial_program(target_v, target_f):
+    """Create a CadProgram that covers the target mesh.
+
+    For simple meshes (few components), tries all four primitives and picks
+    the best. For complex multi-component meshes (trees, humanoids), fits
+    one cylinder per connected component to capture branches/limbs correctly.
     """
     from .elegance import score_accuracy
 
     target_v = np.asarray(target_v, dtype=np.float64)
     target_f = np.asarray(target_f)
 
-    # Try all four primitives and pick the best
+    # Decompose into connected components
+    from scipy.sparse import csr_matrix
+    from scipy.sparse.csgraph import connected_components
+
+    n = len(target_v)
+    rows = np.concatenate([target_f[:, 0], target_f[:, 1], target_f[:, 2]])
+    cols = np.concatenate([target_f[:, 1], target_f[:, 2], target_f[:, 0]])
+    adj = csr_matrix((np.ones(len(rows)), (rows, cols)), shape=(n, n))
+    n_comp, labels = connected_components(adj, directed=False)
+
+    # Gather component info, skip tiny components
+    min_verts = max(4, int(n * 0.002))  # at least 0.2% of mesh
+    comps = []
+    for c in range(n_comp):
+        idx = np.where(labels == c)[0]
+        if len(idx) < min_verts:
+            continue
+        comps.append(idx)
+
+    # Sort by size descending
+    comps.sort(key=lambda x: len(x), reverse=True)
+
+    # Strategy 1: For meshes with many components, fit per-component primitives
+    if len(comps) >= 4:
+        ops = []
+        # Fit best primitive to each significant component using
+        # Hausdorff-based accuracy (not fitting residual) as criterion
+        max_ops = min(len(comps), 30)
+        for comp_idx in comps[:max_ops]:
+            comp_v = target_v[comp_idx]
+            best_op = None
+            best_acc = -1.0
+            for shape in ("cylinder", "box", "sphere"):
+                try:
+                    op = _make_candidate_op(shape, comp_v)
+                    if op is None:
+                        continue
+                    # Evaluate against the component's own vertices
+                    test_prog = CadProgram([op])
+                    acc = score_accuracy(test_prog, comp_v,
+                                         np.zeros((0, 3), dtype=np.int64))
+                    if acc > best_acc:
+                        best_acc = acc
+                        best_op = op
+                except Exception:
+                    pass
+            if best_op is not None:
+                ops.append(best_op)
+
+        if ops:
+            prog = CadProgram(ops)
+            acc = score_accuracy(prog, target_v, target_f)
+            # Also try the single-primitive approach and pick the better one
+            best_single = _best_single_primitive(target_v, target_f)
+            if best_single is not None:
+                single_acc = score_accuracy(best_single, target_v, target_f)
+                if single_acc > acc:
+                    return best_single
+            return prog
+
+    # Strategy 2: For few-component meshes, try single primitives and
+    # also axial segmentation (split along principal axis into 2-4 slices,
+    # fit a cylinder per slice — good for tapered/varied-radius shapes)
+    best_single = _best_single_primitive(target_v, target_f)
+    best_segmented = _axial_segmented_program(target_v, target_f)
+
+    if best_single is None and best_segmented is None:
+        return CadProgram([_make_candidate_op("sphere", target_v)])
+
+    from .elegance import score_accuracy
+    candidates = []
+    if best_single is not None:
+        candidates.append((score_accuracy(best_single, target_v, target_f),
+                           best_single))
+    if best_segmented is not None:
+        candidates.append((score_accuracy(best_segmented, target_v, target_f),
+                           best_segmented))
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    return candidates[0][1]
+
+
+def _axial_segmented_program(target_v, target_f, n_segments=None):
+    """Split the mesh along its principal axis into segments, fit each.
+
+    Useful for tapered shapes (bottles, rockets) where a single cylinder
+    can't capture varying radius.  Tries multiple segment counts (3-8)
+    and returns the best.
+    """
+    from .elegance import score_accuracy
+
+    v = np.asarray(target_v, dtype=np.float64)
+    center = v.mean(axis=0)
+    centered = v - center
+
+    # PCA for principal axis
+    cov = centered.T @ centered / len(v)
+    eigvals, eigvecs = np.linalg.eigh(cov)
+    order = np.argsort(eigvals)[::-1]
+    axis = eigvecs[:, order[0]]
+    if axis[2] < 0:
+        axis = -axis
+
+    # Project onto axis
+    proj = centered @ axis
+    p_min, p_max = proj.min(), proj.max()
+    span = p_max - p_min
+
+    if span < 1e-8:
+        return None
+
+    if n_segments is not None:
+        seg_counts = [n_segments]
+    else:
+        seg_counts = [3, 4, 5, 6, 8, 10, 12, 15, 20]
+
+    best_prog = None
+    best_acc = -1.0
+
+    for n_seg in seg_counts:
+        ops = []
+        boundaries = np.linspace(p_min, p_max, n_seg + 1)
+        prog = _build_segmented_ops(v, proj, boundaries, span)
+        if prog is not None and prog.n_enabled() >= 2:
+            acc = score_accuracy(prog, target_v, target_f)
+            if acc > best_acc:
+                best_acc = acc
+                best_prog = prog
+
+    return best_prog
+
+
+def _build_segmented_ops(v, proj, boundaries, span):
+    """Build ops from axial segmentation boundaries.
+
+    Uses Hausdorff-based accuracy (not fitting residual) to pick
+    the best primitive per segment, same as the component-aware strategy.
+    """
+    from .elegance import score_accuracy
+
+    ops = []
+    n_segments = len(boundaries) - 1
+    for seg_i in range(n_segments):
+        lo, hi = boundaries[seg_i], boundaries[seg_i + 1]
+        # Expand slightly to avoid gaps
+        lo_exp = lo - span * 0.02
+        hi_exp = hi + span * 0.02
+        mask = (proj >= lo_exp) & (proj <= hi_exp)
+        seg_v = v[mask]
+        if len(seg_v) < 4:
+            continue
+
+        # Try each primitive and pick best by accuracy against segment
+        best_op = None
+        best_acc = -1.0
+        empty_f = np.zeros((0, 3), dtype=np.int64)
+
+        for shape in ("cylinder", "box", "cone"):
+            try:
+                op = _make_candidate_op(shape, seg_v)
+                if op is None:
+                    continue
+                test_prog = CadProgram([op])
+                acc = score_accuracy(test_prog, seg_v, empty_f)
+                if acc > best_acc:
+                    best_acc = acc
+                    best_op = op
+            except Exception:
+                pass
+
+        if best_op is not None:
+            ops.append(best_op)
+
+    if len(ops) < 2:
+        return None
+    return CadProgram(ops)
+
+
+def _best_single_primitive(target_v, target_f):
+    """Try all four primitive types, return program with best accuracy."""
+    from .elegance import score_accuracy
+
     candidates = []
     for shape in ("sphere", "cylinder", "cone", "box"):
         try:
@@ -718,18 +976,13 @@ def initial_program(target_v, target_f):
             if op is not None:
                 prog = CadProgram([op])
                 acc = score_accuracy(prog, target_v, target_f)
-                candidates.append((acc, shape, prog))
+                candidates.append((acc, prog))
         except Exception:
             pass
-
     if not candidates:
-        # Fallback to sphere
-        op = _make_candidate_op("sphere", target_v)
-        return CadProgram([op])
-
-    # Sort by accuracy descending, pick the best
+        return None
     candidates.sort(key=lambda x: x[0], reverse=True)
-    return candidates[0][2]
+    return candidates[0][1]
 
 
 # ---------------------------------------------------------------------------

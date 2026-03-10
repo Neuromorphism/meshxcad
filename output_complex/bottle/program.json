@@ -6,39 +6,154 @@
         "enabled": true,
         "params": {
           "center": [
-            -7.047314121155779e-19,
-            -5.421010862427522e-20,
-            0.15
+            0.0,
+            5.421010862427522e-19,
+            0.0
+          ],
+          "axis": [
+            1.0,
+            0.0,
+            0.0
+          ],
+          "radius": 5.421010862427522e-19,
+          "height": 0.08,
+          "h_divs": 2
+        }
+      },
+      {
+        "op_type": "cylinder",
+        "enabled": true,
+        "params": {
+          "center": [
+            -1.4456028966473393e-18,
+            1.0842021724855044e-18,
+            0.0
+          ],
+          "axis": [
+            0.0,
+            -0.0,
+            1.0
+          ],
+          "radius": 0.04,
+          "height": 0.0,
+          "h_divs": 2
+        }
+      },
+      {
+        "op_type": "cylinder",
+        "enabled": true,
+        "params": {
+          "center": [
+            -6.505213034913027e-19,
+            -3.9754079657802593e-19,
+            0.1875
+          ],
+          "axis": [
+            0.0,
+            5.551115123125783e-17,
+            1.0000000000000002
+          ],
+          "radius": 0.036,
+          "height": 0.01500000000000002,
+          "h_divs": 2
+        }
+      },
+      {
+        "op_type": "cylinder",
+        "enabled": true,
+        "params": {
+          "center": [
+            0.0,
+            -1.807003620809174e-18,
+            0.20250000000000012
+          ],
+          "axis": [
+            1.0,
+            0.0,
+            0.0
+          ],
+          "radius": 0.015657479051853967,
+          "height": 0.064,
+          "h_divs": 2
+        }
+      },
+      {
+        "op_type": "cylinder",
+        "enabled": true,
+        "params": {
+          "center": [
+            -5.059610138265688e-19,
+            -1.4456028966473392e-19,
+            0.21
           ],
           "axis": [
             0.0,
             0.0,
-            0.9999999999999999
+            1.0
           ],
-          "radius": 0.0165,
-          "height": 0.29999999999999993
+          "radius": 0.015,
+          "height": 0.0,
+          "h_divs": 2
+        }
+      },
+      {
+        "op_type": "cylinder",
+        "enabled": true,
+        "params": {
+          "center": [
+            -5.059610138265688e-19,
+            -1.4456028966473392e-19,
+            0.285
+          ],
+          "axis": [
+            0.0,
+            -0.0,
+            1.0
+          ],
+          "radius": 0.015,
+          "height": 0.0,
+          "h_divs": 2
+        }
+      },
+      {
+        "op_type": "cylinder",
+        "enabled": true,
+        "params": {
+          "center": [
+            -3.3730734255104583e-19,
+            0.0,
+            0.29500000000000043
+          ],
+          "axis": [
+            -0.0,
+            -0.9999999999999999,
+            6.682651050348461e-17
+          ],
+          "radius": 0.010511399274975033,
+          "height": 0.03599999999999999,
+          "h_divs": 2
         }
       }
     ],
-    "n_ops": 1,
-    "complexity": 1.0
+    "n_ops": 7,
+    "complexity": 7.0
   },
   "initial": {
-    "elegance": 0.8203,
-    "accuracy": 0.8108,
-    "cad_score": 0.4915,
-    "n_ops": 1,
-    "program": "1 ops: cylinder"
+    "elegance": 0.6867,
+    "accuracy": 0.9559,
+    "cad_score": 0.3757,
+    "n_ops": 7,
+    "program": "7 ops: cylinder \u2192 cylinder \u2192 cylinder \u2192 cylinder \u2192 cylinder \u2192 cylinder \u2192 cylinder"
   },
   "final": {
-    "elegance": 0.8203,
-    "accuracy": 0.8108,
-    "cad_score": 0.4915,
-    "n_ops": 1,
-    "program_summary": "1 ops: cylinder"
+    "elegance": 0.6942,
+    "accuracy": 0.9721,
+    "cad_score": 0.3077,
+    "n_ops": 7,
+    "program_summary": "7 ops: cylinder \u2192 cylinder \u2192 cylinder \u2192 cylinder \u2192 cylinder \u2192 cylinder \u2192 cylinder"
   },
   "feature_fidelity": 0.8,
   "converged": true,
-  "total_sweeps": 3,
-  "elapsed_sec": 0.6
+  "total_sweeps": 4,
+  "elapsed_sec": 5.1
 }

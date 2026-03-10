@@ -421,7 +421,8 @@ def _run_discriminator_pass(state, library, rng, rounds_per_object=5):
             if state.initial_accuracy < ACCURACY_FLOOR:
                 acc_floor = max(0.0, state.initial_accuracy - 0.05)
             else:
-                acc_floor = max(ACCURACY_FLOOR, state.initial_accuracy - 0.05)
+                # Tight floor: don't let accuracy drop more than 1% from initial
+                acc_floor = max(ACCURACY_FLOOR, state.initial_accuracy - 0.01)
             if (mut_joint > best_joint
                     and mut_acc >= acc_floor):
                 best_joint = mut_joint
@@ -487,7 +488,8 @@ def _run_elegance_pass(state, library, rng, rounds_per_object=5):
             if state.initial_accuracy < ACCURACY_FLOOR:
                 acc_floor = max(0.0, state.initial_accuracy - 0.05)
             else:
-                acc_floor = max(ACCURACY_FLOOR, state.initial_accuracy - 0.05)
+                # Tight floor: don't let accuracy drop more than 1% from initial
+                acc_floor = max(ACCURACY_FLOOR, state.initial_accuracy - 0.01)
             if (mut_joint > best_joint
                     and mut_acc >= acc_floor):
                 best_joint = mut_joint

@@ -1086,11 +1086,26 @@ def _generate_anti_cad_mutations(program, features, target_v, target_f):
     simplify_program(p, target_v, target_f)
     mutations.append(("simplify", p))
 
+    # Strategy 5b: Try batch h_divs for all cylinders (match mesh density)
+    cyl_disc = [(i, op) for i, op in enumerate(program.operations)
+                if op.enabled and op.op_type in ("cylinder", "cone")]
+    if cyl_disc:
+        for trial_hdivs in [2, 3, 4]:
+            p = program.copy()
+            changed = False
+            for i, op in cyl_disc:
+                if p.operations[i].params.get("h_divs", 10) != trial_hdivs:
+                    p.operations[i].params["h_divs"] = trial_hdivs
+                    changed = True
+            if changed:
+                p.invalidate_cache()
+                mutations.append((f"batch_hdivs_{trial_hdivs}", p))
+
     # Strategy 6: Add secondary primitive at largest gap
-    if program.n_enabled() < 6:
+    if program.n_enabled() < 10:
         gaps = find_program_gaps(program, target_v, target_f, max_gaps=3)
         for i, gap in enumerate(gaps):
-            if gap.action == "add" and gap.residual_score > 0.5:
+            if gap.action == "add" and gap.residual_score > 0.3:
                 p = program.copy()
                 add_operation(p, gap)
                 # Refine the newly added op
@@ -1099,7 +1114,7 @@ def _generate_anti_cad_mutations(program, features, target_v, target_f):
                 mutations.append((f"add_gap_primitive_{i}", p))
 
     # Strategy 7: Add subtract_cylinder for concavities
-    if program.n_enabled() < 6:
+    if program.n_enabled() < 8:
         cad_v, cad_f = program.evaluate()
         if len(cad_v) > 0:
             _try_subtract_mutations(
@@ -1107,7 +1122,7 @@ def _generate_anti_cad_mutations(program, features, target_v, target_f):
 
     # Strategy 8: Feature-targeted fill (same as elegance strategy 14,
     # also in the discriminator loop so it gets tried in both passes)
-    if program.n_enabled() < 6:
+    if program.n_enabled() < 10:
         _try_feature_targeted_fill(
             program, target_v, target_f, mutations,
             np.random.RandomState(42))
@@ -1206,6 +1221,7 @@ def _mutate_for_elegance(program, target_v, target_f, rng):
     - Improve origin anchoring
     """
     mutations = []
+    acc = score_accuracy(program, target_v, target_f)
 
     # Strategy 1: Simplify (remove redundant ops)
     p = program.copy()
@@ -1230,8 +1246,8 @@ def _mutate_for_elegance(program, target_v, target_f, rng):
             "normal": [1, 0, 0], "point": [0, 0, 0],
         }))
         p.invalidate_cache()
-        acc = score_accuracy(p, target_v, target_f)
-        if acc > 0.4:
+        mirror_acc = score_accuracy(p, target_v, target_f)
+        if mirror_acc > 0.4:
             mutations.append(("mirror_replace", p))
 
     # Strategy 3: Upgrade op type (e.g., replace sphere+translate with sphere at center)
@@ -1251,17 +1267,19 @@ def _mutate_for_elegance(program, target_v, target_f, rng):
             p = program.copy()
             p.operations[i].enabled = False
             p.invalidate_cache()
-            acc = score_accuracy(p, target_v, target_f)
-            if acc > 0.5:
+            rm_acc = score_accuracy(p, target_v, target_f)
+            if rm_acc > 0.5:
                 mutations.append(("remove_boolean", p))
 
     # Strategy 5: Refine existing ops for better accuracy without adding more
-    for i, op in enumerate(program.operations):
-        if op.enabled and op.op_type in ("sphere", "cylinder", "box", "cone"):
-            p = program.copy()
-            refine_operation(p, i, target_v, target_f, max_iter=15)
-            mutations.append(("refine_" + op.op_type, p))
-            break
+    # Skip if accuracy is already high (expensive and unlikely to help)
+    if acc < 0.95:
+        for i, op in enumerate(program.operations):
+            if op.enabled and op.op_type in ("sphere", "cylinder", "box", "cone"):
+                p = program.copy()
+                refine_operation(p, i, target_v, target_f, max_iter=10)
+                mutations.append(("refine_" + op.op_type, p))
+                break
 
     # Strategy 6: Random parameter perturbation (explore new territory)
     p = program.copy()
@@ -1276,7 +1294,6 @@ def _mutate_for_elegance(program, target_v, target_f, rng):
     mutations.append(("perturb_params", p))
 
     # Strategy 7: Add an operation to fill gaps (if accuracy is low)
-    acc = score_accuracy(program, target_v, target_f)
     if acc < 0.7:
         gaps = find_program_gaps(program, target_v, target_f, max_gaps=1)
         if gaps:
@@ -1285,14 +1302,14 @@ def _mutate_for_elegance(program, target_v, target_f, rng):
             mutations.append(("add_for_accuracy", p))
 
     # Strategy 8: Add + refine gap primitive (more thorough than strategy 7)
-    if acc < 0.85 and program.n_enabled() < 5:
-        gaps = find_program_gaps(program, target_v, target_f, max_gaps=3)
+    if acc < 0.96 and program.n_enabled() < 8:
+        gaps = find_program_gaps(program, target_v, target_f, max_gaps=2)
         for i, gap in enumerate(gaps):
             if gap.action == "add":
                 p = program.copy()
                 add_operation(p, gap)
                 refine_operation(p, len(p.operations) - 1,
-                                 target_v, target_f, max_iter=20)
+                                 target_v, target_f, max_iter=10)
                 mutations.append((f"add_refined_gap_{i}", p))
 
     # Strategy 9: Multi-gap fill — add 2-3 primitives at once
@@ -1320,12 +1337,28 @@ def _mutate_for_elegance(program, target_v, target_f, rng):
         _try_torus_ring(program, target_v, target_f, mutations)
 
     # Strategy 12: Refine all ops (not just first) for multi-op programs
-    if program.n_enabled() >= 2:
+    if 2 <= program.n_enabled() <= 4:
         p = program.copy()
         for i, op in enumerate(p.operations):
             if op.enabled:
                 refine_operation(p, i, target_v, target_f, max_iter=10)
         mutations.append(("refine_all_ops", p))
+
+    # Strategy 12b: Try batch h_divs for all cylinder ops at once
+    # (matching target mesh density is usually the biggest single improvement)
+    cyl_ops = [(i, op) for i, op in enumerate(program.operations)
+               if op.enabled and op.op_type in ("cylinder", "cone")]
+    if cyl_ops:
+        for trial_hdivs in [2, 3, 4]:
+            p = program.copy()
+            changed = False
+            for i, op in cyl_ops:
+                if p.operations[i].params.get("h_divs", 10) != trial_hdivs:
+                    p.operations[i].params["h_divs"] = trial_hdivs
+                    changed = True
+            if changed:
+                p.invalidate_cache()
+                mutations.append((f"batch_hdivs_{trial_hdivs}", p))
 
     # Strategy 13: Add scaled copy at offset (cover more of the target)
     if acc < 0.7 and program.n_enabled() == 1:
@@ -1333,7 +1366,7 @@ def _mutate_for_elegance(program, target_v, target_f, rng):
 
     # Strategy 14: Feature-targeted fill — find the worst-covered
     # medium/small feature and add a primitive fitted to its vertices
-    if program.n_enabled() < 6:
+    if program.n_enabled() < 10:
         _try_feature_targeted_fill(
             program, target_v, target_f, mutations, rng)
 
