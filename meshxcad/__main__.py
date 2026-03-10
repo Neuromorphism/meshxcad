@@ -360,6 +360,169 @@ def optimise(target_v, target_f, *,
 # CLI
 # ---------------------------------------------------------------------------
 
+def _run_drawing_mode(args):
+    """Handle the 'drawing' subcommand: image → CAD via vision model."""
+    from .drawing import render_drawing_sheet
+    from .drawing_compare import compare_drawings
+    from .drawing_spec import DrawingSpec
+    from .drawing_to_cad import drawing_to_cad
+    from .vision import DrawingInterpreter
+    from .cad_program import CadProgram
+    from PIL import Image as PILImage
+
+    if not os.path.isfile(args.drawing):
+        print(f"Error: drawing file not found: {args.drawing}", file=sys.stderr)
+        sys.exit(1)
+
+    out_dir = args.output or os.path.splitext(args.drawing)[0] + "_cad"
+    os.makedirs(out_dir, exist_ok=True)
+
+    if not args.quiet:
+        print(f"Loading drawing: {args.drawing}")
+
+    # Parse views
+    views = tuple(args.views.split(",")) if args.views else None
+
+    # Load vision model and interpret drawing
+    if not args.quiet:
+        print("Loading vision model...")
+    interpreter = DrawingInterpreter(
+        model_path=args.model,
+        quantize=args.quantize or "auto",
+    )
+
+    if not args.quiet:
+        print("Interpreting drawing...")
+    spec = interpreter.interpret_drawing(args.drawing, views_hint=views)
+
+    # Save spec
+    spec_path = os.path.join(out_dir, "drawing_spec.json")
+    with open(spec_path, "w") as f:
+        f.write(spec.to_json())
+    if not args.quiet:
+        print(f"  Type: {spec.object_type}, Symmetry: {spec.symmetry}")
+        print(f"  Dimensions: {len(spec.dimensions)}")
+        print(f"  Spec saved to {spec_path}")
+
+    # Build initial CAD program
+    program = drawing_to_cad(spec)
+    if not args.quiet:
+        print(f"  Initial program: {program.summary()}")
+
+    # Optionally optimise against the drawing image
+    sweeps = args.sweeps
+    rounds = args.rounds
+    if args.fast:
+        sweeps = 3
+        rounds = 3
+
+    if sweeps > 0:
+        if not args.quiet:
+            print(f"\nOptimising ({sweeps} sweeps, {rounds} rounds)...")
+
+        drawing_img = np.array(PILImage.open(args.drawing).convert("L"))
+        program = _optimise_against_drawing(
+            program, drawing_img,
+            views=views or ("front", "side", "top"),
+            max_sweeps=sweeps,
+            rounds=rounds,
+            patience=args.patience,
+            verbose=not args.quiet,
+        )
+
+    # Output
+    prog_path = os.path.join(out_dir, "program.json")
+    with open(prog_path, "w") as f:
+        json.dump(program.to_dict(), f, indent=2)
+
+    cad_v, cad_f = program.evaluate()
+    if len(cad_v) > 0:
+        stl_path = os.path.join(out_dir, "output.stl")
+        from .stl_io import write_binary_stl
+        write_binary_stl(stl_path, cad_v, cad_f)
+
+        # Render comparison
+        sheet = render_drawing_sheet(cad_v, cad_f,
+                                     views or ("front", "side", "top"), 512)
+        comp_path = os.path.join(out_dir, "rendered.png")
+        PILImage.fromarray(sheet).save(comp_path)
+
+        if not args.quiet:
+            print(f"\nOutput:")
+            print(f"  {prog_path}")
+            print(f"  {stl_path}")
+            print(f"  {comp_path}")
+
+
+def _optimise_against_drawing(program, drawing_img, views, max_sweeps,
+                               rounds, patience, verbose):
+    """Run coevolution-style optimisation using drawing comparison as accuracy."""
+    from .drawing import render_drawing_sheet
+    from .drawing_compare import compare_drawings
+    from .cad_program import CadProgram
+    from .elegance import compute_elegance_score
+    import copy
+
+    best_program = program.copy()
+    best_score = -1.0
+
+    no_improve = 0
+    for sweep in range(max_sweeps):
+        cad_v, cad_f = program.evaluate()
+        if len(cad_v) == 0:
+            break
+
+        rendered = render_drawing_sheet(cad_v, cad_f, views, 512)
+        # Convert to grayscale for comparison
+        if rendered.ndim == 3:
+            rendered_gray = np.mean(rendered, axis=2).astype(np.uint8)
+        else:
+            rendered_gray = rendered
+
+        metrics = compare_drawings(drawing_img, rendered_gray)
+        max_dist = max(drawing_img.shape) * 0.5
+        chamfer_score = max(0, 1.0 - metrics["chamfer_distance"] / max_dist)
+        score = (0.5 * chamfer_score +
+                 0.3 * metrics["pixel_iou"] +
+                 0.2 * (metrics["edge_precision"] + metrics["edge_recall"]) / 2)
+
+        if verbose:
+            print(f"  Sweep {sweep+1}: score={score:.3f} "
+                  f"(chamfer={metrics['chamfer_distance']:.1f}, "
+                  f"iou={metrics['pixel_iou']:.3f})")
+
+        if score > best_score + 0.002:
+            best_score = score
+            best_program = program.copy()
+            no_improve = 0
+        else:
+            no_improve += 1
+            if no_improve >= patience:
+                if verbose:
+                    print(f"  Converged after {sweep+1} sweeps")
+                break
+
+        # Simple mutation: try random parameter perturbations
+        program = _mutate_program(best_program)
+
+    return best_program
+
+
+def _mutate_program(program):
+    """Simple random perturbation of program parameters."""
+    import copy
+    prog = program.copy()
+    rng = np.random.default_rng()
+    for op in prog.operations:
+        if not op.enabled:
+            continue
+        for key, val in op.params.items():
+            if isinstance(val, (int, float)) and key not in ("divs", "subdivisions",
+                                                               "radial_divs", "height_divs"):
+                op.params[key] = val * (1.0 + rng.normal(0, 0.05))
+    return prog
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="meshxcad",
@@ -374,10 +537,41 @@ examples:
   python -m meshxcad part.stl -o results/         # output dir
   python -m meshxcad part.stl --fast              # quick single sweep
   python -m meshxcad part.stl --sweeps 30 -r 10   # thorough
+
+drawing mode:
+  python -m meshxcad drawing input.png            # interpret drawing → CAD
+  python -m meshxcad drawing input.png --fast     # quick mode
 """,
     )
 
-    parser.add_argument("mesh",
+    subparsers = parser.add_subparsers(dest="command")
+
+    # Drawing subcommand
+    draw_parser = subparsers.add_parser("drawing",
+                                         help="Interpret a mechanical drawing → CAD")
+    draw_parser.add_argument("drawing",
+                              help="Drawing image file (PNG, JPG)")
+    draw_parser.add_argument("--model", default=None,
+                              help="Vision model path or HF model ID")
+    draw_parser.add_argument("--views", default=None,
+                              help="Comma-separated view types (front,side,top)")
+    draw_parser.add_argument("--quantize", default=None,
+                              help="Model quantisation: 4bit, 8bit, none, auto")
+    draw_parser.add_argument("-o", "--output", default=None,
+                              help="Output directory")
+    draw_parser.add_argument("--sweeps", type=int, default=15,
+                              help="Max optimisation sweeps (default: 15)")
+    draw_parser.add_argument("-r", "--rounds", type=int, default=5,
+                              help="Inner rounds per sweep (default: 5)")
+    draw_parser.add_argument("--patience", type=int, default=3,
+                              help="Stop after N no-improvement sweeps (default: 3)")
+    draw_parser.add_argument("--fast", action="store_true",
+                              help="Quick mode (3 sweeps, 3 rounds)")
+    draw_parser.add_argument("-q", "--quiet", action="store_true",
+                              help="Suppress progress output")
+
+    # Original mesh arguments (backward compatible)
+    parser.add_argument("mesh", nargs="?", default=None,
                         help="Target mesh file (STL/OBJ/PLY/STEP/IGES)")
     parser.add_argument("-c", "--cad", default=None,
                         help="Starting CAD: JSON program or STEP/IGES file")
@@ -397,6 +591,11 @@ examples:
                         help="Only output JSON (no mesh STL)")
 
     args = parser.parse_args()
+
+    # Dispatch to drawing mode if subcommand
+    if args.command == "drawing":
+        _run_drawing_mode(args)
+        return
 
     # --- Validate inputs ---
     if not os.path.isfile(args.mesh):
