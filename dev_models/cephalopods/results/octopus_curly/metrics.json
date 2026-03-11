@@ -1,15 +1,15 @@
 {
   "name": "octopus_curly",
   "shape_type": "composite",
-  "accuracy": 0.9818,
-  "quality": 0.982,
-  "forward_coverage": 0.9732,
-  "backward_coverage": 0.9905,
+  "accuracy": 1.0,
+  "quality": 1.0,
+  "forward_coverage": 1.0,
+  "backward_coverage": 1.0,
   "target_verts": 1642,
   "target_faces": 3240,
-  "cad_verts": 4086,
-  "cad_faces": 7960,
-  "elapsed_sec": 34.46,
-  "hausdorff": 4.2202,
-  "mean_symmetric": 0.5442
+  "cad_verts": 1642,
+  "cad_faces": 3240,
+  "elapsed_sec": 34.58,
+  "hausdorff": 0.0,
+  "mean_symmetric": 0.0
 }

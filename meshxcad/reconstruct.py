@@ -1731,11 +1731,15 @@ def _classify_component(vertices, faces, bbox_diag_total):
     aspect = sorted_dims[0] / max(sorted_dims[1], 1e-12)
 
     # Classification logic
-    if flatness > 5.0 and elongation < 3.0:
+    # Wings: extremely flat components (flatness > 12 means nearly 2D)
+    if flatness > 12.0 and elongation < 4.0:
         return {"component_type": "wing", "shape_type": "freeform",
                 "elongation": elongation, "flatness": flatness}
 
-    if elongation > 2.0 or aspect > 2.5:
+    # Tentacles: very highly elongated components (elongation > 4.0)
+    # Threshold is set high to avoid classifying tall symmetric shapes
+    # (like chess pieces, vases, columns) as tentacles
+    if elongation > 4.0 or aspect > 5.0:
         return {"component_type": "tentacle", "shape_type": "sweep",
                 "elongation": elongation}
 
@@ -1773,12 +1777,60 @@ def reconstruct_composite(vertices, faces):
 
     bbox_diag = float(np.linalg.norm(v.max(axis=0) - v.min(axis=0)))
 
+    # Filter out tiny artifact components (mesh noise, floating fragments)
+    # A component is "significant" if it has >= 3% of total vertices
+    # and its bounding box is >= 5% of the total mesh diagonal
+    total_verts = len(v)
+    significant_idx = set()
+    significant = []
+    for ci, (comp_v, comp_f, orig_idx) in enumerate(components):
+        comp_bbox_diag = float(np.linalg.norm(
+            comp_v.max(axis=0) - comp_v.min(axis=0)))
+        is_significant = (len(comp_v) >= total_verts * 0.03 and
+                          comp_bbox_diag >= bbox_diag * 0.05)
+        if is_significant:
+            significant.append((comp_v, comp_f, orig_idx))
+            significant_idx.add(ci)
+
+    # If only 0 or 1 significant components, not truly composite
+    if len(significant) <= 1:
+        return None
+
+    # Classify significant components and check for structural diversity
+    comp_types = []
+    for cv, cf, idx in significant:
+        cls = _classify_component(cv, cf, bbox_diag)
+        comp_types.append(cls["component_type"])
+
+    unique_types = set(comp_types)
+    # All same type => not truly composite
+    if len(unique_types) == 1:
+        return None
+    # Need tentacles for composite to be worthwhile
+    if "tentacle" not in unique_types:
+        return None
+
     all_cad_v = []
     all_cad_f = []
     comp_info = []
     v_offset = 0
 
-    for comp_v, comp_f, orig_idx in components:
+    # Add insignificant components as identity copies (preserves mesh completeness)
+    for ci, (comp_v, comp_f, orig_idx) in enumerate(components):
+        if ci in significant_idx:
+            continue
+        all_cad_v.append(comp_v.copy())
+        all_cad_f.append(comp_f + v_offset)
+        v_offset += len(comp_v)
+        comp_info.append({
+            "component_type": "detail",
+            "shape_type": "identity",
+            "n_verts": len(comp_v),
+            "n_faces": len(comp_f),
+        })
+
+    # Reconstruct significant components
+    for comp_v, comp_f, orig_idx in significant:
         # Classify this component
         cls = _classify_component(comp_v, comp_f, bbox_diag)
         comp_type = cls["component_type"]
@@ -1808,10 +1860,11 @@ def reconstruct_composite(vertices, faces):
                 sphere_result = reconstruct_sphere(comp_v)
                 cad_v = sphere_result["cad_vertices"]
                 cad_f = sphere_result["cad_faces"]
-                # Only use sphere if quality is decent
                 sq = _measure_quality(cad_v, comp_v)
-                if sq < 0.5:
-                    rev_result = reconstruct_revolve(comp_v, comp_f)
+                # Compare sphere vs revolve and use whichever is better
+                rev_result = reconstruct_revolve(comp_v, comp_f)
+                rq = rev_result.get("quality", 0.0)
+                if rq > sq:
                     cad_v = rev_result["cad_vertices"]
                     cad_f = rev_result["cad_faces"]
             except Exception:

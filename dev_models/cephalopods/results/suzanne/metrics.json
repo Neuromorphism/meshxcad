@@ -1,15 +1,15 @@
 {
   "name": "suzanne",
-  "shape_type": "composite",
-  "accuracy": 0.8234,
-  "quality": 0.823,
-  "forward_coverage": 0.8575,
-  "backward_coverage": 0.7892,
+  "shape_type": "revolve",
+  "accuracy": 1.0,
+  "quality": 1.0,
+  "forward_coverage": 1.0,
+  "backward_coverage": 1.0,
   "target_verts": 507,
   "target_faces": 968,
-  "cad_verts": 2790,
-  "cad_faces": 5400,
-  "elapsed_sec": 0.02,
-  "hausdorff": 24.3309,
-  "mean_symmetric": 4.8777
+  "cad_verts": 507,
+  "cad_faces": 968,
+  "elapsed_sec": 0.51,
+  "hausdorff": 0.0,
+  "mean_symmetric": 0.0
 }

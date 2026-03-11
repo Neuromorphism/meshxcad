@@ -9,7 +9,7 @@
   "target_faces": 764,
   "cad_verts": 388,
   "cad_faces": 764,
-  "elapsed_sec": 0.6,
+  "elapsed_sec": 0.36,
   "hausdorff": 0.0,
   "mean_symmetric": 0.0
 }
