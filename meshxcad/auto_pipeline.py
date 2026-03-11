@@ -51,6 +51,7 @@ def auto_pipeline(target_v, target_f, *,
             elapsed_sec: total wall time
     """
     from .cad_program import (CadProgram, initial_program, refine_operation,
+                              refine_operation_diff,
                               mesh_complexity, _make_candidate_op)
     from .elegance import score_accuracy, compute_elegance_score
 
@@ -225,8 +226,10 @@ def auto_pipeline(target_v, target_f, *,
 
     for i, op in enumerate(prog.operations):
         if op.enabled:
-            refine_operation(prog, i, target_v, target_f,
-                             max_iter=cfg["refine_iter"])
+            # Use gradient-based refinement (autodiff or finite-diff),
+            # falling back to coordinate descent if unavailable
+            refine_operation_diff(prog, i, target_v, target_f,
+                                  max_iter=cfg["refine_iter"])
 
     acc_after_refine = score_accuracy(prog, target_v, target_f)
     phase_rec = {
