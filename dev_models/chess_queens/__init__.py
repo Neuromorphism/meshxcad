@@ -116,6 +116,7 @@ QUEEN_FILES = {
     "smycynek":         "smycynek_queen.obj",
     "stevenalbert":     "stevenalbert_queen.obj",
     "bnolin":           "bnolin_queen.obj",
+    "spiral":           "spiral_queen.stl",
 }
 
 
