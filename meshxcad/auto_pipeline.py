@@ -182,11 +182,17 @@ def auto_pipeline(target_v, target_f, *,
             cfg["_seg_strategy"] = overrides["segmentation_strategy"]
         if overrides.get("seed") is not None:
             cfg["_seed"] = overrides["seed"]
+        if overrides.get("no_early_exit"):
+            cfg["_no_early_exit"] = True
     phases = []
 
     def _log(phase_name, msg):
         if verbose:
             print(f"  [{phase_name}] {msg}")
+
+    # Early-exit threshold: set unreachably high if --no-early-exit
+    early_exit_threshold = (2.0 if cfg.get("_no_early_exit")
+                            else EARLY_EXIT_ACCURACY)
 
     # ------------------------------------------------------------------
     # Phase 1: Analyse — classify shape, estimate complexity, set budget
@@ -249,10 +255,10 @@ def auto_pipeline(target_v, target_f, *,
 
         # Short-circuit: if basic already meets the early-exit threshold,
         # skip the more expensive initialization strategies entirely.
-        _skip_expensive_init = acc_basic >= EARLY_EXIT_ACCURACY
+        _skip_expensive_init = acc_basic >= early_exit_threshold
         if _skip_expensive_init and verbose:
             _log("init", f"basic strategy acc={acc_basic:.4f} >= "
-                 f"{EARLY_EXIT_ACCURACY}, skipping expensive strategies")
+                 f"{early_exit_threshold}, skipping expensive strategies")
 
         # Strategy B: reconstruct_cad — shape-aware reconstruction
         if (not _skip_expensive_init
@@ -340,7 +346,8 @@ def auto_pipeline(target_v, target_f, *,
     # Early exit after initialisation if accuracy is already excellent
     result = _maybe_early_exit(
         prog, target_v, target_f, phases, t_start, mode,
-        best_strategy, None, verbose, score_accuracy, compute_elegance_score)
+        best_strategy, None, verbose, score_accuracy, compute_elegance_score,
+        threshold=early_exit_threshold)
     if result is not None:
         return result
 
@@ -395,10 +402,10 @@ def auto_pipeline(target_v, target_f, *,
                  f"ops={state.program.n_enabled()}")
 
         # Early exit from coevolution if accuracy already excellent
-        if state.accuracy >= EARLY_EXIT_ACCURACY:
+        if state.accuracy >= early_exit_threshold:
             if verbose:
                 _log("coevolve", f"accuracy {state.accuracy:.4f} >= "
-                     f"{EARLY_EXIT_ACCURACY}, stopping early")
+                     f"{early_exit_threshold}, stopping early")
             break
 
     prog = state.program
@@ -416,7 +423,7 @@ def auto_pipeline(target_v, target_f, *,
     result = _maybe_early_exit(
         prog, target_v, target_f, phases, t_start, mode,
         best_strategy, library, verbose, score_accuracy,
-        compute_elegance_score)
+        compute_elegance_score, threshold=early_exit_threshold)
     if result is not None:
         return result
 
@@ -456,7 +463,7 @@ def auto_pipeline(target_v, target_f, *,
         result = _maybe_early_exit(
             prog, target_v, target_f, phases, t_start, mode,
             best_strategy, library, verbose, score_accuracy,
-            compute_elegance_score)
+            compute_elegance_score, threshold=early_exit_threshold)
         if result is not None:
             return result
 
@@ -493,7 +500,7 @@ def auto_pipeline(target_v, target_f, *,
     result = _maybe_early_exit(
         prog, target_v, target_f, phases, t_start, mode,
         best_strategy, library, verbose, score_accuracy,
-        compute_elegance_score)
+        compute_elegance_score, threshold=early_exit_threshold)
     if result is not None:
         return result
 
@@ -528,7 +535,7 @@ def auto_pipeline(target_v, target_f, *,
     result = _maybe_early_exit(
         prog, target_v, target_f, phases, t_start, mode,
         best_strategy, library, verbose, score_accuracy,
-        compute_elegance_score)
+        compute_elegance_score, threshold=early_exit_threshold)
     if result is not None:
         return result
 

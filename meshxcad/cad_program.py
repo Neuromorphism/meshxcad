@@ -100,22 +100,41 @@ def mesh_complexity(vertices, faces):
     else:
         n_comp = 1
 
-    # Curvature entropy
+    # Curvature entropy (vectorised — uses GPU when available)
     curvature_entropy = 0.0
     if n_verts > 3 and n_faces > 0:
         try:
-            angle_sum = np.zeros(n_verts)
-            for tri in faces:
-                for k in range(3):
-                    i, j, l = int(tri[k]), int(tri[(k + 1) % 3]), int(tri[(k + 2) % 3])
-                    v1 = vertices[j] - vertices[i]
-                    v2 = vertices[l] - vertices[i]
-                    len1 = np.linalg.norm(v1)
-                    len2 = np.linalg.norm(v2)
-                    if len1 > 1e-12 and len2 > 1e-12:
-                        cos_a = np.clip(np.dot(v1, v2) / (len1 * len2), -1, 1)
-                        angle_sum[i] += _math.acos(cos_a)
-            curvature = 2 * _math.pi - angle_sum
+            from .gpu import get_array_module, is_gpu_available, to_cpu, row_norms
+            xp = get_array_module()
+            _use_gpu = is_gpu_available()
+
+            if _use_gpu:
+                _verts = xp.asarray(vertices, dtype=xp.float64)
+                _faces = xp.asarray(faces)
+            else:
+                _verts = vertices
+                _faces = faces
+
+            angle_sum = xp.zeros(n_verts, dtype=xp.float64)
+            for k in range(3):
+                i_idx = _faces[:, k]
+                j_idx = _faces[:, (k + 1) % 3]
+                l_idx = _faces[:, (k + 2) % 3]
+                v1 = _verts[j_idx] - _verts[i_idx]
+                v2 = _verts[l_idx] - _verts[i_idx]
+                len1 = xp.linalg.norm(v1, axis=1)
+                len2 = xp.linalg.norm(v2, axis=1)
+                valid = (len1 > 1e-12) & (len2 > 1e-12)
+                cos_a = xp.zeros(n_faces, dtype=xp.float64)
+                cos_a[valid] = xp.clip(
+                    xp.einsum('ij,ij->i', v1[valid], v2[valid])
+                    / (len1[valid] * len2[valid]),
+                    -1, 1)
+                angles = xp.zeros(n_faces, dtype=xp.float64)
+                angles[valid] = xp.arccos(cos_a[valid])
+                xp.add.at(angle_sum, i_idx, angles)
+
+            curvature = to_cpu(2 * _math.pi - angle_sum) if _use_gpu else (2 * _math.pi - angle_sum)
             n_bins = min(30, max(5, n_verts // 10))
             hist, _ = np.histogram(curvature, bins=n_bins, density=True)
             hist = hist[hist > 0]
@@ -136,14 +155,16 @@ def mesh_complexity(vertices, faces):
     else:
         aspect_spread = 0.0
 
-    # Edge entropy
+    # Edge entropy (uses GPU row_norms when available)
     edge_entropy = 0.0
     if n_faces > 0:
         try:
+            from .gpu import row_norms as _row_norms
+            e0 = vertices[faces[:, 1]] - vertices[faces[:, 0]]
+            e1 = vertices[faces[:, 2]] - vertices[faces[:, 1]]
+            e2 = vertices[faces[:, 0]] - vertices[faces[:, 2]]
             edges = np.concatenate([
-                np.linalg.norm(vertices[faces[:, 1]] - vertices[faces[:, 0]], axis=1),
-                np.linalg.norm(vertices[faces[:, 2]] - vertices[faces[:, 1]], axis=1),
-                np.linalg.norm(vertices[faces[:, 0]] - vertices[faces[:, 2]], axis=1),
+                _row_norms(e0), _row_norms(e1), _row_norms(e2),
             ])
             n_bins = min(20, max(5, len(edges) // 20))
             hist, _ = np.histogram(edges, bins=n_bins, density=True)

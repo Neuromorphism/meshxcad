@@ -841,6 +841,8 @@ def _run_auto(args):
         overrides["no_polish"] = True
     if getattr(args, "no_final_sweep", False):
         overrides["final_sweep"] = False
+    if getattr(args, "no_early_exit", False):
+        overrides["no_early_exit"] = True
     if getattr(args, "seg_strategy", None) is not None:
         overrides["segmentation_strategy"] = args.seg_strategy
     if getattr(args, "seed", None) is not None:
@@ -1223,6 +1225,9 @@ examples — adding detail to an existing STEP file:
                               "edge sharpening, hole filling)")
     auto_p.add_argument("--no-final-sweep", action="store_true",
                          help="Skip the final coevolution cleanup sweep")
+    auto_p.add_argument("--no-early-exit", action="store_true",
+                         help="Disable early exit when accuracy >= 99%%; "
+                              "always run all phases to completion")
     # STEP tessellation
     auto_p.add_argument("--deflection", type=float, default=0.1,
                          help="Tessellation linear deflection for STEP/IGES input "
