@@ -1,0 +1,15 @@
+{
+  "name": "squid_compact",
+  "shape_type": "composite",
+  "accuracy": 0.9741,
+  "quality": 0.974,
+  "forward_coverage": 0.9616,
+  "backward_coverage": 0.9866,
+  "target_verts": 2030,
+  "target_faces": 4008,
+  "cad_verts": 2638,
+  "cad_faces": 5168,
+  "elapsed_sec": 48.21,
+  "hausdorff": 5.7277,
+  "mean_symmetric": 0.6443
+}

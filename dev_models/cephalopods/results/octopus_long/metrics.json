@@ -1,0 +1,15 @@
+{
+  "name": "octopus_long",
+  "shape_type": "composite",
+  "accuracy": 0.9904,
+  "quality": 0.99,
+  "forward_coverage": 0.9853,
+  "backward_coverage": 0.9955,
+  "target_verts": 1642,
+  "target_faces": 3240,
+  "cad_verts": 2310,
+  "cad_faces": 4520,
+  "elapsed_sec": 36.99,
+  "hausdorff": 2.033,
+  "mean_symmetric": 0.2794
+}

@@ -1,0 +1,15 @@
+{
+  "name": "octopus_stubby",
+  "shape_type": "composite",
+  "accuracy": 0.9745,
+  "quality": 0.974,
+  "forward_coverage": 0.9622,
+  "backward_coverage": 0.9867,
+  "target_verts": 1642,
+  "target_faces": 3240,
+  "cad_verts": 4086,
+  "cad_faces": 7960,
+  "elapsed_sec": 29.18,
+  "hausdorff": 6.3311,
+  "mean_symmetric": 0.8147
+}

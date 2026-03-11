@@ -1614,6 +1614,246 @@ def reconstruct_freeform(vertices, faces, n_slices=20, n_profile=32):
 
 
 # ---------------------------------------------------------------------------
+# Mesh decomposition and composite reconstruction
+# ---------------------------------------------------------------------------
+
+def decompose_mesh(vertices, faces):
+    """Split a mesh into connected components using face adjacency.
+
+    Args:
+        vertices: (N, 3) array
+        faces:    (M, 3) array of triangle vertex indices
+
+    Returns:
+        list of (component_vertices, component_faces, original_vertex_indices)
+        where each component has re-indexed faces starting from 0.
+    """
+    v = np.asarray(vertices, dtype=np.float64)
+    f = np.asarray(faces, dtype=np.int64)
+    n_verts = len(v)
+
+    # Union-Find for vertex connectivity via faces
+    parent = list(range(n_verts))
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    for face in f:
+        union(face[0], face[1])
+        union(face[1], face[2])
+
+    # Group vertices by component
+    from collections import defaultdict
+    groups = defaultdict(list)
+    for i in range(n_verts):
+        groups[find(i)].append(i)
+
+    if len(groups) <= 1:
+        return [(v, f, np.arange(n_verts))]
+
+    components = []
+    for root, vert_indices in groups.items():
+        if len(vert_indices) < 3:
+            continue  # skip degenerate components
+
+        vert_set = set(vert_indices)
+        old_to_new = {old: new for new, old in enumerate(vert_indices)}
+
+        # Collect faces that belong to this component
+        comp_faces = []
+        for face in f:
+            if face[0] in vert_set and face[1] in vert_set and face[2] in vert_set:
+                comp_faces.append([old_to_new[face[0]], old_to_new[face[1]],
+                                   old_to_new[face[2]]])
+
+        if len(comp_faces) < 1:
+            continue
+
+        comp_v = v[vert_indices]
+        comp_f = np.array(comp_faces, dtype=np.int64)
+        components.append((comp_v, comp_f, np.array(vert_indices)))
+
+    # Sort by vertex count (largest first)
+    components.sort(key=lambda c: -len(c[0]))
+    return components
+
+
+def _classify_component(vertices, faces, bbox_diag_total):
+    """Classify a single mesh component as body, tentacle, or detail.
+
+    Args:
+        vertices: (N, 3) component vertices
+        faces: (M, 3) component faces
+        bbox_diag_total: bounding box diagonal of the full mesh
+
+    Returns:
+        dict with: component_type ("body", "tentacle", "wing", "detail"),
+                   shape_type, and fit info
+    """
+    v = np.asarray(vertices, dtype=np.float64)
+    bbox = v.max(axis=0) - v.min(axis=0)
+    bbox_diag = float(np.linalg.norm(bbox))
+
+    # Tiny component relative to total mesh
+    if bbox_diag < bbox_diag_total * 0.05:
+        return {"component_type": "detail", "shape_type": "sphere"}
+
+    # PCA for elongation analysis
+    center = v.mean(axis=0)
+    centered = v - center
+    cov = centered.T @ centered / max(len(v), 1)
+    eigvals, eigvecs = np.linalg.eigh(cov)
+    order = np.argsort(eigvals)[::-1]
+    eigvals = eigvals[order]
+
+    # Elongation ratio
+    if eigvals[1] > 1e-12:
+        elongation = float(np.sqrt(eigvals[0] / eigvals[1]))
+    else:
+        elongation = 10.0
+
+    # Flatness ratio (for wings)
+    if eigvals[2] > 1e-12:
+        flatness = float(np.sqrt(eigvals[1] / eigvals[2]))
+    else:
+        flatness = 10.0
+
+    # Aspect ratio of bounding box
+    sorted_dims = sorted(bbox, reverse=True)
+    aspect = sorted_dims[0] / max(sorted_dims[1], 1e-12)
+
+    # Classification logic
+    if flatness > 5.0 and elongation < 3.0:
+        return {"component_type": "wing", "shape_type": "freeform",
+                "elongation": elongation, "flatness": flatness}
+
+    if elongation > 2.0 or aspect > 2.5:
+        return {"component_type": "tentacle", "shape_type": "sweep",
+                "elongation": elongation}
+
+    # Check sphericity
+    sphere = fit_sphere(v)
+    sphere_score = sphere["residual"] / max(bbox_diag, 1e-12)
+
+    if sphere_score < 0.1:
+        return {"component_type": "body", "shape_type": "sphere",
+                "sphere_score": sphere_score}
+
+    return {"component_type": "body", "shape_type": "revolve",
+            "elongation": elongation}
+
+
+def reconstruct_composite(vertices, faces):
+    """Reconstruct a multi-component mesh by decomposing and reconstructing
+    each component with the best strategy.
+
+    Args:
+        vertices: (N, 3) input mesh
+        faces:    (M, 3) input mesh faces
+
+    Returns:
+        dict with cad_vertices, cad_faces, components, quality
+    """
+    v = np.asarray(vertices, dtype=np.float64)
+    f = np.asarray(faces, dtype=np.int64)
+
+    components = decompose_mesh(v, f)
+
+    if len(components) <= 1:
+        # Single component - not a composite shape
+        return None
+
+    bbox_diag = float(np.linalg.norm(v.max(axis=0) - v.min(axis=0)))
+
+    all_cad_v = []
+    all_cad_f = []
+    comp_info = []
+    v_offset = 0
+
+    for comp_v, comp_f, orig_idx in components:
+        # Classify this component
+        cls = _classify_component(comp_v, comp_f, bbox_diag)
+        comp_type = cls["component_type"]
+        shape = cls["shape_type"]
+
+        # Reconstruct based on component type
+        if comp_type == "detail":
+            # Keep small details as-is (eyes, suckers, etc.)
+            cad_v, cad_f = comp_v.copy(), comp_f.copy()
+        elif comp_type == "tentacle" and shape == "sweep":
+            # Use sweep reconstruction for tentacles
+            try:
+                sweep_result = reconstruct_sweep(comp_v, comp_f)
+                cad_v = sweep_result["cad_vertices"]
+                cad_f = sweep_result["cad_faces"]
+                # Check if sweep is better than revolve-project
+                sq = _measure_quality(cad_v, comp_v)
+                rev_result = reconstruct_revolve(comp_v, comp_f)
+                rq = rev_result.get("quality", 0.0)
+                if rq > sq:
+                    cad_v = rev_result["cad_vertices"]
+                    cad_f = rev_result["cad_faces"]
+            except Exception:
+                cad_v, cad_f = comp_v.copy(), comp_f.copy()
+        elif comp_type == "body" and shape == "sphere":
+            try:
+                sphere_result = reconstruct_sphere(comp_v)
+                cad_v = sphere_result["cad_vertices"]
+                cad_f = sphere_result["cad_faces"]
+                # Only use sphere if quality is decent
+                sq = _measure_quality(cad_v, comp_v)
+                if sq < 0.5:
+                    rev_result = reconstruct_revolve(comp_v, comp_f)
+                    cad_v = rev_result["cad_vertices"]
+                    cad_f = rev_result["cad_faces"]
+            except Exception:
+                cad_v, cad_f = comp_v.copy(), comp_f.copy()
+        else:
+            # Default: revolve reconstruction
+            try:
+                result = reconstruct_revolve(comp_v, comp_f)
+                cad_v = result["cad_vertices"]
+                cad_f = result["cad_faces"]
+            except Exception:
+                cad_v, cad_f = comp_v.copy(), comp_f.copy()
+
+        # Accumulate into combined mesh
+        all_cad_v.append(cad_v)
+        all_cad_f.append(cad_f + v_offset)
+        v_offset += len(cad_v)
+
+        comp_info.append({
+            "component_type": comp_type,
+            "shape_type": shape,
+            "n_verts": len(comp_v),
+            "n_faces": len(comp_f),
+        })
+
+    if not all_cad_v:
+        return None
+
+    combined_v = np.vstack(all_cad_v)
+    combined_f = np.vstack(all_cad_f)
+    quality = _measure_quality(combined_v, v)
+
+    return {
+        "cad_vertices": combined_v,
+        "cad_faces": combined_f,
+        "quality": quality,
+        "n_components": len(components),
+        "components": comp_info,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Full pipeline
 # ---------------------------------------------------------------------------
 
@@ -1637,6 +1877,29 @@ def reconstruct_cad(vertices, faces, shape_type=None):
     """
     v = np.asarray(vertices, dtype=np.float64)
     f = np.asarray(faces)
+
+    # Try composite reconstruction for multi-component meshes first
+    if shape_type is None:
+        try:
+            composite = reconstruct_composite(v, f)
+            if composite is not None and composite["n_components"] > 1:
+                comp_quality = composite.get("quality", 0.0)
+                # Use composite if it found multiple components
+                # (even with lower quality, decomposition is structurally better)
+                return {
+                    "shape_type": "composite",
+                    "cad_vertices": composite["cad_vertices"],
+                    "cad_faces": composite["cad_faces"],
+                    "quality": comp_quality,
+                    "classification": {
+                        "shape_type": "composite",
+                        "n_components": composite["n_components"],
+                        "components": composite["components"],
+                    },
+                    "params": {"n_components": composite["n_components"]},
+                }
+        except Exception:
+            pass  # Fall through to single-shape reconstruction
 
     # Classify if not specified
     if shape_type is None:

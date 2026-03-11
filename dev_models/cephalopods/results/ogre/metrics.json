@@ -1,0 +1,15 @@
+{
+  "name": "ogre",
+  "shape_type": "composite",
+  "accuracy": 0.9603,
+  "quality": 0.96,
+  "forward_coverage": 0.9808,
+  "backward_coverage": 0.9398,
+  "target_verts": 62194,
+  "target_faces": 124008,
+  "cad_verts": 28886,
+  "cad_faces": 57296,
+  "elapsed_sec": 3.8,
+  "hausdorff": 36.4074,
+  "mean_symmetric": 1.1343
+}

@@ -1,15 +1,15 @@
 {
-  "name": "staunton",
+  "name": "armadillo",
   "shape_type": "revolve",
   "accuracy": 1.0,
   "quality": 1.0,
   "forward_coverage": 1.0,
   "backward_coverage": 1.0,
-  "target_verts": 9484,
-  "target_faces": 18964,
-  "cad_verts": 9484,
-  "cad_faces": 18964,
-  "elapsed_sec": 2.58,
+  "target_verts": 49990,
+  "target_faces": 99976,
+  "cad_verts": 49990,
+  "cad_faces": 99976,
+  "elapsed_sec": 15.14,
   "hausdorff": 0.0,
   "mean_symmetric": 0.0
 }
