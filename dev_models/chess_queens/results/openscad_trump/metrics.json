@@ -1,0 +1,15 @@
+{
+  "name": "openscad_trump",
+  "shape_type": "revolve",
+  "accuracy": 1.0,
+  "quality": 1.0,
+  "forward_coverage": 1.0,
+  "backward_coverage": 1.0,
+  "target_verts": 24062,
+  "target_faces": 48464,
+  "cad_verts": 24062,
+  "cad_faces": 48464,
+  "elapsed_sec": 6.71,
+  "hausdorff": 0.0,
+  "mean_symmetric": 0.0
+}

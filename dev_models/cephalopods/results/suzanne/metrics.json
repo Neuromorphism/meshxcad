@@ -1,0 +1,15 @@
+{
+  "name": "suzanne",
+  "shape_type": "composite",
+  "accuracy": 0.8234,
+  "quality": 0.823,
+  "forward_coverage": 0.8575,
+  "backward_coverage": 0.7892,
+  "target_verts": 507,
+  "target_faces": 968,
+  "cad_verts": 2790,
+  "cad_faces": 5400,
+  "elapsed_sec": 0.02,
+  "hausdorff": 24.3309,
+  "mean_symmetric": 4.8777
+}

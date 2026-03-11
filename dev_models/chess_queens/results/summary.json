@@ -1,0 +1,52 @@
+{
+  "results": [
+    {
+      "name": "staunton",
+      "shape_type": "revolve",
+      "accuracy": 1.0,
+      "quality": 1.0,
+      "forward_coverage": 1.0,
+      "backward_coverage": 1.0,
+      "target_verts": 11886,
+      "target_faces": 23768,
+      "cad_verts": 11886,
+      "cad_faces": 23768,
+      "elapsed_sec": 3.65,
+      "hausdorff": 0.0,
+      "mean_symmetric": 0.0
+    },
+    {
+      "name": "duchamp",
+      "shape_type": "revolve",
+      "accuracy": 1.0,
+      "quality": 1.0,
+      "forward_coverage": 1.0,
+      "backward_coverage": 1.0,
+      "target_verts": 8714,
+      "target_faces": 17424,
+      "cad_verts": 8714,
+      "cad_faces": 17424,
+      "elapsed_sec": 2.5,
+      "hausdorff": 0.0,
+      "mean_symmetric": 0.0
+    },
+    {
+      "name": "kings_gambit",
+      "shape_type": "revolve",
+      "accuracy": 1.0,
+      "quality": 1.0,
+      "forward_coverage": 1.0,
+      "backward_coverage": 1.0,
+      "target_verts": 2818,
+      "target_faces": 5692,
+      "cad_verts": 2818,
+      "cad_faces": 5692,
+      "elapsed_sec": 1.47,
+      "hausdorff": 0.0,
+      "mean_symmetric": 0.0
+    }
+  ],
+  "mean_accuracy": 1.0,
+  "n_at_99": 3,
+  "n_total": 3
+}

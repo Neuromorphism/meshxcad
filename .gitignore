@@ -11,10 +11,12 @@ test_data/sphere/
 test_data/cylinder/
 .pytest_cache/
 
-# Ignore STL globally except in dev_models/
+# Ignore STL/OBJ globally except in dev_models/
 *.stl
+*.obj
 !dev_models/*.stl
 !dev_models/*.STL
+!dev_models/*.obj
 !dev_models/**/*.stl
 !dev_models/**/*.STL
 

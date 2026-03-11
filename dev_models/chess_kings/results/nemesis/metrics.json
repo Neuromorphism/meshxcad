@@ -1,0 +1,15 @@
+{
+  "name": "nemesis",
+  "shape_type": "revolve",
+  "accuracy": 1.0,
+  "quality": 1.0,
+  "forward_coverage": 1.0,
+  "backward_coverage": 1.0,
+  "target_verts": 2088,
+  "target_faces": 4172,
+  "cad_verts": 2088,
+  "cad_faces": 4172,
+  "elapsed_sec": 1.94,
+  "hausdorff": 0.0,
+  "mean_symmetric": 0.0
+}

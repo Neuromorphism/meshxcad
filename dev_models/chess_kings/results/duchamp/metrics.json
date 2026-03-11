@@ -1,0 +1,15 @@
+{
+  "name": "duchamp",
+  "shape_type": "revolve",
+  "accuracy": 1.0,
+  "quality": 1.0,
+  "forward_coverage": 1.0,
+  "backward_coverage": 1.0,
+  "target_verts": 7136,
+  "target_faces": 14268,
+  "cad_verts": 7136,
+  "cad_faces": 14268,
+  "elapsed_sec": 1.91,
+  "hausdorff": 0.0,
+  "mean_symmetric": 0.0
+}

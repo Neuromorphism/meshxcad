@@ -1,0 +1,15 @@
+{
+  "name": "ernest",
+  "shape_type": "revolve",
+  "accuracy": 1.0,
+  "quality": 1.0,
+  "forward_coverage": 1.0,
+  "backward_coverage": 1.0,
+  "target_verts": 815,
+  "target_faces": 1626,
+  "cad_verts": 815,
+  "cad_faces": 1626,
+  "elapsed_sec": 1.05,
+  "hausdorff": 0.0,
+  "mean_symmetric": 0.0
+}

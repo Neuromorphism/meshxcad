@@ -1,0 +1,15 @@
+{
+  "name": "kraken_basic",
+  "shape_type": "composite",
+  "accuracy": 0.9813,
+  "quality": 0.981,
+  "forward_coverage": 0.9727,
+  "backward_coverage": 0.9899,
+  "target_verts": 2508,
+  "target_faces": 4960,
+  "cad_verts": 3964,
+  "cad_faces": 7760,
+  "elapsed_sec": 2.62,
+  "hausdorff": 5.2149,
+  "mean_symmetric": 0.6031
+}

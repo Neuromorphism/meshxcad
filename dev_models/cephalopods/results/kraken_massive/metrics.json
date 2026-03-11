@@ -1,0 +1,15 @@
+{
+  "name": "kraken_massive",
+  "shape_type": "composite",
+  "accuracy": 0.9829,
+  "quality": 0.983,
+  "forward_coverage": 0.9737,
+  "backward_coverage": 0.9922,
+  "target_verts": 3316,
+  "target_faces": 6560,
+  "cad_verts": 4772,
+  "cad_faces": 9360,
+  "elapsed_sec": 3.39,
+  "hausdorff": 5.0776,
+  "mean_symmetric": 0.545
+}

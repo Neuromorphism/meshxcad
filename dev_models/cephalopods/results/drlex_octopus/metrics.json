@@ -1,0 +1,15 @@
+{
+  "name": "drlex_octopus",
+  "shape_type": "composite",
+  "accuracy": 0.9582,
+  "quality": 0.958,
+  "forward_coverage": 0.9693,
+  "backward_coverage": 0.947,
+  "target_verts": 85981,
+  "target_faces": 172118,
+  "cad_verts": 38130,
+  "cad_faces": 73800,
+  "elapsed_sec": 1.95,
+  "hausdorff": 9.4029,
+  "mean_symmetric": 1.2136
+}

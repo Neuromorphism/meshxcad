@@ -1,0 +1,15 @@
+{
+  "name": "stevenalbert",
+  "shape_type": "revolve",
+  "accuracy": 1.0,
+  "quality": 1.0,
+  "forward_coverage": 1.0,
+  "backward_coverage": 1.0,
+  "target_verts": 2881,
+  "target_faces": 5710,
+  "cad_verts": 2881,
+  "cad_faces": 5710,
+  "elapsed_sec": 1.57,
+  "hausdorff": 0.0,
+  "mean_symmetric": 0.0
+}

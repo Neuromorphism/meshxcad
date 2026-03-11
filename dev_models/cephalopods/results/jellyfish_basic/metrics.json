@@ -1,0 +1,15 @@
+{
+  "name": "jellyfish_basic",
+  "shape_type": "composite",
+  "accuracy": 0.9488,
+  "quality": 0.949,
+  "forward_coverage": 0.9245,
+  "backward_coverage": 0.973,
+  "target_verts": 1970,
+  "target_faces": 3872,
+  "cad_verts": 2578,
+  "cad_faces": 5032,
+  "elapsed_sec": 73.38,
+  "hausdorff": 14.3795,
+  "mean_symmetric": 1.3929
+}

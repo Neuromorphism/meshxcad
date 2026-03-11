@@ -1,0 +1,15 @@
+{
+  "name": "cheburashka",
+  "shape_type": "revolve",
+  "accuracy": 1.0,
+  "quality": 1.0,
+  "forward_coverage": 1.0,
+  "backward_coverage": 1.0,
+  "target_verts": 6669,
+  "target_faces": 13334,
+  "cad_verts": 6669,
+  "cad_faces": 13334,
+  "elapsed_sec": 2.12,
+  "hausdorff": 0.0,
+  "mean_symmetric": 0.0
+}
