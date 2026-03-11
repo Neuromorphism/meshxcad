@@ -46,13 +46,56 @@ def write_binary_stl(filepath, vertices, faces):
             f.write(struct.pack("<H", 0))
 
 
+def _is_ascii_stl(filepath):
+    """Check if an STL file is ASCII format.
+
+    Binary STL files can also start with 'solid' in their 80-byte header,
+    so we verify by checking whether the expected binary size matches the
+    actual file size.
+    """
+    import os
+    file_size = os.path.getsize(filepath)
+    with open(filepath, "rb") as f:
+        header = f.read(80)
+        if not header.lstrip().startswith(b"solid"):
+            return False
+        # Check if the file matches expected binary STL size
+        count_bytes = f.read(4)
+        if len(count_bytes) == 4:
+            n_triangles = struct.unpack("<I", count_bytes)[0]
+            expected = 80 + 4 + n_triangles * 50
+            if expected == file_size:
+                return False  # it's binary
+    return True
+
+
+def _read_ascii_stl(filepath):
+    """Read an ASCII STL file."""
+    raw_verts = []
+    with open(filepath, "r", errors="replace") as f:
+        for line in f:
+            stripped = line.strip()
+            if stripped.startswith("vertex"):
+                parts = stripped.split()
+                raw_verts.append([float(parts[1]), float(parts[2]), float(parts[3])])
+    if not raw_verts:
+        raise ValueError(f"No vertices found in ASCII STL: {filepath}")
+    raw_verts = np.array(raw_verts, dtype=np.float64)
+    unique_verts, inverse = np.unique(raw_verts, axis=0, return_inverse=True)
+    faces = inverse.reshape(-1, 3)
+    return unique_verts, faces
+
+
 def read_binary_stl(filepath):
-    """Read a binary STL file.
+    """Read an STL file (binary or ASCII).
 
     Returns:
         vertices: (N, 3) array (deduplicated)
         faces: (M, 3) array of triangle vertex indices
     """
+    if _is_ascii_stl(filepath):
+        return _read_ascii_stl(filepath)
+
     with open(filepath, "rb") as f:
         header = f.read(80)
         n_triangles = struct.unpack("<I", f.read(4))[0]

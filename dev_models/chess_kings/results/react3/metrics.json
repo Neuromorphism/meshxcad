@@ -1,0 +1,15 @@
+{
+  "name": "react3",
+  "shape_type": "revolve",
+  "accuracy": 1.0,
+  "quality": 1.0,
+  "forward_coverage": 1.0,
+  "backward_coverage": 1.0,
+  "target_verts": 3304,
+  "target_faces": 6540,
+  "cad_verts": 3304,
+  "cad_faces": 6540,
+  "elapsed_sec": 1.57,
+  "hausdorff": 0.0,
+  "mean_symmetric": 0.0
+}

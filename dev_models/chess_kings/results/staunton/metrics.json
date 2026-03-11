@@ -1,0 +1,15 @@
+{
+  "name": "staunton",
+  "shape_type": "revolve",
+  "accuracy": 1.0,
+  "quality": 1.0,
+  "forward_coverage": 1.0,
+  "backward_coverage": 1.0,
+  "target_verts": 9484,
+  "target_faces": 18964,
+  "cad_verts": 9484,
+  "cad_faces": 18964,
+  "elapsed_sec": 4.39,
+  "hausdorff": 0.0,
+  "mean_symmetric": 0.0
+}
