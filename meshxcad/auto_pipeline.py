@@ -9,18 +9,20 @@ Two modes:
 The pipeline runs these phases in order, each phase only proceeding if
 it improves the result:
 
-    Phase 1  Analyse     — classify shape, estimate complexity, set budget
-    Phase 2  Initialise  — build starting program (or load existing);
-                           uses reconstruct_cad for shape-aware init and
-                           diffusion strategy as a competing initialiser
-    Phase 3  Coevolve    — alternating discriminator + elegance sweeps
-    Phase 3b Diffusion   — diffusion-based strategy refinement pass
-    Phase 4  Segment     — find uncovered regions (learned strategy selection)
-    Phase 5  Fill gaps   — fit new primitives to uncovered segments
-    Phase 6  Refine      — gradient-based parameter tuning per operation
-    Phase 7  Fillets     — detect and add intersection blend surfaces
-    Phase 8  Final sweep — one last coevolution pass to clean up
-    Phase 9  Record      — save experience for federated learning
+    Phase 1   Analyse       — classify shape, estimate complexity, set budget
+    Phase 2   Initialise    — compete initialisers: basic, reconstruct_cad,
+                              tracing, and diffusion strategy
+    Phase 3   Coevolve      — alternating discriminator + elegance sweeps
+    Phase 3b  Diffusion     — diffusion-based strategy refinement pass
+    Phase 4   Segment       — find uncovered regions (learned strategy)
+    Phase 5   Fill gaps     — fit new primitives to uncovered segments
+    Phase 6   Refine        — gradient-based parameter tuning per operation
+    Phase 6b  Profile refine— adaptive revolve/extrude profile refinement
+    Phase 7   Fillets       — detect and add intersection blend surfaces
+    Phase 8   Final sweep   — one last coevolution pass to clean up
+    Phase 8b  Mesh polish   — laplacian smoothing, feature edge sharpening,
+                              hole filling on the output mesh
+    Phase 9   Record        — save experience for federated learning
 """
 
 import copy
@@ -174,7 +176,25 @@ def auto_pipeline(target_v, target_f, *,
             except Exception:
                 pass
 
-        # Strategy C: diffusion strategy (for normal/thorough)
+        # Strategy C: tracing reconstruction (segment → revolve/extrude/sweep)
+        if cfg["use_reconstruct"]:
+            try:
+                from .tracing import trace_reconstruct
+                trace_result = trace_reconstruct(target_v, target_f)
+                if (trace_result and trace_result.get("quality", 0) > 0.3
+                        and trace_result.get("cad_vertices") is not None
+                        and len(trace_result["cad_vertices"]) > 0):
+                    # Convert trace result to a CadProgram via segments
+                    trace_prog = _tracing_to_program(
+                        trace_result, target_v, target_f)
+                    if trace_prog is not None:
+                        acc_trace = score_accuracy(trace_prog, target_v,
+                                                    target_f)
+                        init_strategies["tracing"] = (trace_prog, acc_trace)
+            except Exception:
+                pass
+
+        # Strategy D: diffusion strategy (for normal/thorough)
         if cfg["diffusion_steps"] > 0:
             try:
                 from .diffusion_strategy import (
@@ -370,6 +390,36 @@ def auto_pipeline(target_v, target_f, *,
         _log("refine", f"acc {acc_before_refine:.4f} → {acc_after_refine:.4f}")
 
     # ------------------------------------------------------------------
+    # Phase 6b: Adaptive profile refinement (revolve/extrude operations)
+    # ------------------------------------------------------------------
+    if thoroughness != "quick":
+        phase_start = time.time()
+        acc_before_profile = score_accuracy(prog, target_v, target_f)
+        profile_improved = _refine_profiles(prog, target_v, target_f, verbose)
+        acc_after_profile = score_accuracy(prog, target_v, target_f)
+
+        # Rollback if profile refinement made things worse
+        if acc_after_profile < acc_before_profile - 0.001:
+            # Re-run the gradient refinement to restore
+            for i, op in enumerate(prog.operations):
+                if op.enabled:
+                    refine_operation_diff(prog, i, target_v, target_f,
+                                          max_iter=5)
+            acc_after_profile = score_accuracy(prog, target_v, target_f)
+
+        phase_rec = {
+            "phase": "profile_refine",
+            "accuracy_before": round(acc_before_profile, 4),
+            "accuracy_after": round(acc_after_profile, 4),
+            "ops_refined": profile_improved,
+            "elapsed": round(time.time() - phase_start, 2),
+        }
+        phases.append(phase_rec)
+        if verbose and profile_improved > 0:
+            _log("profile", f"refined {profile_improved} ops, "
+                 f"acc {acc_before_profile:.4f} → {acc_after_profile:.4f}")
+
+    # ------------------------------------------------------------------
     # Phase 7: Detect and add fillets
     # ------------------------------------------------------------------
     phase_start = time.time()
@@ -417,6 +467,28 @@ def auto_pipeline(target_v, target_f, *,
         phases.append(phase_rec)
         if verbose:
             _log("final", f"acc {acc_before_final:.4f} → {acc_after_final:.4f}")
+
+    # ------------------------------------------------------------------
+    # Phase 8b: Mesh polish — smooth, sharpen edges, fill holes
+    # ------------------------------------------------------------------
+    if thoroughness != "quick":
+        phase_start = time.time()
+        acc_before_polish = score_accuracy(prog, target_v, target_f)
+        polish_info = _polish_output_mesh(prog, target_v, target_f, verbose)
+        acc_after_polish = score_accuracy(prog, target_v, target_f)
+
+        phase_rec = {
+            "phase": "mesh_polish",
+            "accuracy_before": round(acc_before_polish, 4),
+            "accuracy_after": round(acc_after_polish, 4),
+            "steps_applied": polish_info.get("steps_applied", []),
+            "elapsed": round(time.time() - phase_start, 2),
+        }
+        phases.append(phase_rec)
+        if verbose and polish_info.get("steps_applied"):
+            _log("polish", f"acc {acc_before_polish:.4f} → "
+                 f"{acc_after_polish:.4f} "
+                 f"({', '.join(polish_info['steps_applied'])})")
 
     # ------------------------------------------------------------------
     # Final scoring
@@ -818,6 +890,271 @@ def _add_fillets(program, target_v, target_f, verbose):
             program.invalidate_cache()
 
     return added
+
+
+# ---------------------------------------------------------------------------
+# Tracing reconstruction → CadProgram converter
+# ---------------------------------------------------------------------------
+
+def _tracing_to_program(trace_result, target_v, target_f):
+    """Convert a trace_reconstruct result into a CadProgram.
+
+    The tracing module segments the mesh and reconstructs each segment
+    via revolve/extrude/sweep/loft.  We translate the per-segment
+    reconstructions into CadOp operations.
+    """
+    from .cad_program import CadProgram, CadOp
+
+    segments = trace_result.get("segments", [])
+    if not segments:
+        return None
+
+    ops = []
+    for seg in segments:
+        action = seg.cad_action if hasattr(seg, 'cad_action') else "freeform"
+
+        if action == "revolve" and seg.profile is not None and len(seg.profile) >= 2:
+            profile = np.asarray(seg.profile).tolist()
+            # Sort by Z
+            profile.sort(key=lambda p: p[1])
+            ops.append(CadOp("revolve", {
+                "profile_rz": profile,
+                "n_angular": min(48, max(16, len(seg.vertices) // 10)),
+            }))
+
+        elif action == "extrude" and seg.profile is not None and len(seg.profile) >= 3:
+            profile_2d = np.asarray(seg.profile).tolist()
+            v = seg.vertices
+            proj = (v - seg.centroid) @ seg.primary_axis
+            height = float(proj.max() - proj.min())
+            ops.append(CadOp("extrude", {
+                "polygon": profile_2d,
+                "height": max(height, 0.01),
+            }))
+
+        elif action == "sweep" and seg.path is not None and len(seg.path) >= 2:
+            # Sweep ops are expensive — only add if confident
+            if seg.quality is not None and seg.quality > 0.4:
+                radii = np.linalg.norm(seg.vertices - seg.centroid, axis=1)
+                r = float(np.median(radii)) * 0.5
+                ops.append(CadOp("cylinder", {
+                    "center": seg.centroid.tolist(),
+                    "radius": r,
+                    "height": float(np.linalg.norm(seg.path[-1] - seg.path[0])),
+                    "axis": (seg.primary_axis / max(
+                        np.linalg.norm(seg.primary_axis), 1e-12)).tolist(),
+                }))
+
+        # Skip freeform/loft — they don't map to parametric CadOps
+
+    if not ops:
+        return None
+
+    try:
+        prog = CadProgram(ops)
+        v, f = prog.evaluate()
+        if len(v) == 0:
+            return None
+        return prog
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Adaptive profile refinement for revolve/extrude operations
+# ---------------------------------------------------------------------------
+
+def _refine_profiles(program, target_v, target_f, verbose):
+    """Apply adaptive profile refinement to revolve and extrude operations.
+
+    For revolve operations: uses adaptive_revolve to rebuild per-ring
+    radii from the target mesh, then updates the operation's profile.
+
+    For extrude operations: uses adaptive_extrude to rebuild per-height
+    cross-sections from the target mesh.
+
+    Returns the number of operations that were improved.
+    """
+    from .elegance import score_accuracy
+    import copy
+
+    improved_count = 0
+
+    for i, op in enumerate(program.operations):
+        if not op.enabled:
+            continue
+
+        if op.op_type == "revolve":
+            improved_count += _refine_revolve_op(
+                program, i, target_v, target_f, verbose)
+
+        elif op.op_type == "profiled_cylinder":
+            improved_count += _refine_revolve_op(
+                program, i, target_v, target_f, verbose)
+
+    return improved_count
+
+
+def _refine_revolve_op(program, op_idx, target_v, target_f, verbose):
+    """Refine a revolve/profiled_cylinder op using adaptive profile tools.
+
+    Tries several profile refinement strategies and keeps the best one.
+    """
+    from .elegance import score_accuracy
+    import copy
+
+    op = program.operations[op_idx]
+    acc_before = score_accuracy(program, target_v, target_f)
+    best_acc = acc_before
+    best_params = copy.deepcopy(op.params)
+
+    # Strategy 1: Refine profile radii from mesh
+    try:
+        from .revolve_align import refine_profile_radii, extract_radial_profile
+
+        profile = op.params.get("profile_rz") or op.params.get("radii")
+        if profile is not None:
+            profile_rz = np.asarray(profile)
+            if profile_rz.ndim == 2 and profile_rz.shape[1] == 2:
+                refined = refine_profile_radii(profile_rz, target_v, blend=0.7)
+                old_profile = op.params.get("profile_rz")
+                op.params["profile_rz"] = refined.tolist()
+                program.invalidate_cache()
+                acc_test = score_accuracy(program, target_v, target_f)
+                if acc_test > best_acc + 0.0005:
+                    best_acc = acc_test
+                    best_params = copy.deepcopy(op.params)
+                else:
+                    op.params["profile_rz"] = old_profile
+                    program.invalidate_cache()
+    except Exception:
+        op.params = copy.deepcopy(best_params)
+        program.invalidate_cache()
+
+    # Strategy 2: Insert detail points where mesh has fine features
+    try:
+        from .revolve_align import insert_profile_detail
+
+        profile = op.params.get("profile_rz")
+        if profile is not None:
+            profile_rz = np.asarray(profile)
+            if profile_rz.ndim == 2 and profile_rz.shape[1] == 2:
+                detailed = insert_profile_detail(profile_rz, target_v,
+                                                  threshold=0.3)
+                old_profile = op.params.get("profile_rz")
+                op.params["profile_rz"] = detailed.tolist()
+                program.invalidate_cache()
+                acc_test = score_accuracy(program, target_v, target_f)
+                if acc_test > best_acc + 0.0005:
+                    best_acc = acc_test
+                    best_params = copy.deepcopy(op.params)
+                else:
+                    op.params["profile_rz"] = old_profile
+                    program.invalidate_cache()
+    except Exception:
+        op.params = copy.deepcopy(best_params)
+        program.invalidate_cache()
+
+    # Restore best params
+    op.params = best_params
+    program.invalidate_cache()
+
+    improved = best_acc > acc_before + 0.0005
+    if improved and verbose:
+        print(f"    profile {op.op_type}[{op_idx}]: "
+              f"acc {acc_before:.4f} → {best_acc:.4f}")
+    return 1 if improved else 0
+
+
+# ---------------------------------------------------------------------------
+# Mesh quality polish: smooth, sharpen edges, fill holes
+# ---------------------------------------------------------------------------
+
+def _polish_output_mesh(program, target_v, target_f, verbose):
+    """Apply mesh quality improvements to the output CAD mesh.
+
+    Runs three steps (each only kept if it improves accuracy):
+    1. Laplacian smoothing biased toward target mesh
+    2. Feature edge sharpening where target has sharp edges
+    3. Surface hole filling
+
+    These operate on the evaluated mesh vertices, not on the CadProgram
+    operations, so they're applied as a final post-processing step.
+
+    Returns info dict with steps applied.
+    """
+    from .elegance import score_accuracy
+
+    cad_v, cad_f = program.evaluate()
+    if len(cad_v) == 0:
+        return {"steps_applied": []}
+
+    steps_applied = []
+    best_v = cad_v.copy()
+    best_acc = score_accuracy(program, target_v, target_f)
+
+    # Step 1: Laplacian smoothing toward target
+    try:
+        from .general_align import laplacian_smooth_toward
+        smoothed = laplacian_smooth_toward(
+            best_v, cad_f, target_v,
+            iterations=3, lam=0.3, target_weight=0.4)
+        # Test improvement by temporarily overriding the cache
+        acc_smooth = _score_mesh_accuracy(smoothed, cad_f, target_v)
+        if acc_smooth > best_acc + 0.0005:
+            best_v = smoothed
+            best_acc = acc_smooth
+            steps_applied.append("smooth")
+    except Exception:
+        pass
+
+    # Step 2: Feature edge sharpening
+    try:
+        from .general_align import feature_edge_transfer
+        sharpened, n_sharp = feature_edge_transfer(
+            best_v, cad_f, target_v, target_f,
+            dihedral_threshold_deg=35.0)
+        if n_sharp > 0:
+            acc_sharp = _score_mesh_accuracy(sharpened, cad_f, target_v)
+            if acc_sharp > best_acc + 0.0005:
+                best_v = sharpened
+                best_acc = acc_sharp
+                steps_applied.append(f"sharpen({n_sharp} edges)")
+    except Exception:
+        pass
+
+    # Step 3: Fill surface holes
+    try:
+        from .general_align import fill_surface_holes
+        filled_v, filled_f = fill_surface_holes(best_v, cad_f)
+        if len(filled_f) > len(cad_f):
+            acc_fill = _score_mesh_accuracy(filled_v, filled_f, target_v)
+            if acc_fill > best_acc + 0.0005:
+                best_v = filled_v
+                cad_f = filled_f
+                best_acc = acc_fill
+                steps_applied.append("fill_holes")
+    except Exception:
+        pass
+
+    # Apply the polished mesh back to the program's cache if improved
+    if steps_applied:
+        program._polished_mesh = (best_v, cad_f)
+
+    return {"steps_applied": steps_applied, "accuracy": round(best_acc, 4)}
+
+
+def _score_mesh_accuracy(cad_v, cad_f, target_v):
+    """Score accuracy of a raw mesh against target (without going through
+    CadProgram evaluation).  Used for mesh polish steps.
+    """
+    tree = _AKDTree(cad_v)
+    dists, _ = tree.query(target_v)
+    bbox_diag = float(np.linalg.norm(target_v.max(0) - target_v.min(0)))
+    if bbox_diag < 1e-12:
+        return 0.0
+    mean_dist = float(np.mean(dists))
+    return max(0.0, 1.0 - mean_dist / bbox_diag * 10)
 
 
 # ---------------------------------------------------------------------------
