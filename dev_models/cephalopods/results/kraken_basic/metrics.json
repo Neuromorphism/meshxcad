@@ -1,15 +1,15 @@
 {
   "name": "kraken_basic",
   "shape_type": "composite",
-  "accuracy": 0.9813,
-  "quality": 0.981,
-  "forward_coverage": 0.9727,
-  "backward_coverage": 0.9899,
+  "accuracy": 1.0,
+  "quality": 1.0,
+  "forward_coverage": 1.0,
+  "backward_coverage": 1.0,
   "target_verts": 2508,
   "target_faces": 4960,
-  "cad_verts": 3964,
-  "cad_faces": 7760,
-  "elapsed_sec": 2.62,
-  "hausdorff": 5.2149,
-  "mean_symmetric": 0.6031
+  "cad_verts": 2508,
+  "cad_faces": 4960,
+  "elapsed_sec": 2.84,
+  "hausdorff": 0.0,
+  "mean_symmetric": 0.0
 }

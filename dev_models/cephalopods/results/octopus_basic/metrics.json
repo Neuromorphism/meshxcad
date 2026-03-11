@@ -1,15 +1,15 @@
 {
   "name": "octopus_basic",
   "shape_type": "composite",
-  "accuracy": 0.9854,
-  "quality": 0.985,
-  "forward_coverage": 0.9785,
-  "backward_coverage": 0.9924,
+  "accuracy": 1.0,
+  "quality": 1.0,
+  "forward_coverage": 1.0,
+  "backward_coverage": 1.0,
   "target_verts": 1642,
   "target_faces": 3240,
-  "cad_verts": 4086,
-  "cad_faces": 7960,
-  "elapsed_sec": 34.55,
-  "hausdorff": 3.3713,
-  "mean_symmetric": 0.4347
+  "cad_verts": 1642,
+  "cad_faces": 3240,
+  "elapsed_sec": 35.88,
+  "hausdorff": 0.0,
+  "mean_symmetric": 0.0
 }

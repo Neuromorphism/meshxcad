@@ -1,15 +1,15 @@
 {
   "name": "cthulhu_many_tentacles",
   "shape_type": "composite",
-  "accuracy": 0.9763,
-  "quality": 0.976,
-  "forward_coverage": 0.9622,
-  "backward_coverage": 0.9905,
+  "accuracy": 1.0,
+  "quality": 1.0,
+  "forward_coverage": 1.0,
+  "backward_coverage": 1.0,
   "target_verts": 2754,
   "target_faces": 5400,
-  "cad_verts": 4228,
-  "cad_faces": 8236,
-  "elapsed_sec": 72.35,
-  "hausdorff": 5.8419,
-  "mean_symmetric": 0.6863
+  "cad_verts": 2754,
+  "cad_faces": 5400,
+  "elapsed_sec": 76.92,
+  "hausdorff": 0.0,
+  "mean_symmetric": 0.0
 }

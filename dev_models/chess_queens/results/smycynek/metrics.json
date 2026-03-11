@@ -1,15 +1,15 @@
 {
   "name": "smycynek",
-  "shape_type": "composite",
-  "accuracy": 0.9675,
-  "quality": 0.968,
-  "forward_coverage": 0.94,
-  "backward_coverage": 0.9951,
+  "shape_type": "revolve",
+  "accuracy": 1.0,
+  "quality": 1.0,
+  "forward_coverage": 1.0,
+  "backward_coverage": 1.0,
   "target_verts": 3741,
   "target_faces": 4284,
-  "cad_verts": 6146,
-  "cad_faces": 9654,
-  "elapsed_sec": 22.33,
-  "hausdorff": 19.0426,
-  "mean_symmetric": 0.7793
+  "cad_verts": 3741,
+  "cad_faces": 4284,
+  "elapsed_sec": 0.93,
+  "hausdorff": 0.0,
+  "mean_symmetric": 0.0
 }

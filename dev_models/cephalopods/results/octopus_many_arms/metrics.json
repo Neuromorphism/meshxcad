@@ -1,15 +1,15 @@
 {
   "name": "octopus_many_arms",
   "shape_type": "composite",
-  "accuracy": 0.9869,
-  "quality": 0.987,
-  "forward_coverage": 0.9797,
-  "backward_coverage": 0.994,
+  "accuracy": 1.0,
+  "quality": 1.0,
+  "forward_coverage": 1.0,
+  "backward_coverage": 1.0,
   "target_verts": 2290,
   "target_faces": 4520,
-  "cad_verts": 4734,
-  "cad_faces": 9240,
-  "elapsed_sec": 52.91,
-  "hausdorff": 3.7199,
-  "mean_symmetric": 0.3946
+  "cad_verts": 2290,
+  "cad_faces": 4520,
+  "elapsed_sec": 55.37,
+  "hausdorff": 0.0,
+  "mean_symmetric": 0.0
 }
