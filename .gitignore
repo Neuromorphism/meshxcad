@@ -15,6 +15,8 @@ test_data/cylinder/
 *.stl
 !dev_models/*.stl
 !dev_models/*.STL
+!dev_models/**/*.stl
+!dev_models/**/*.STL
 
 # dev_models: ignore downloads and scripts, keep .step/.stp/.stl
 dev_models/downloads/
