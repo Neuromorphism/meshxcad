@@ -1299,6 +1299,25 @@ examples — adding detail to an existing STEP file:
 
     args = parser.parse_args()
 
+    # --- GPU backend status at startup ---
+    _quiet = getattr(args, "quiet", False)
+    if not _quiet:
+        from .gpu import get_backend, is_gpu_available, gpu_selftest
+        _be = get_backend()
+        if is_gpu_available():
+            _ok, _detail = gpu_selftest()
+            if _ok:
+                print(f"GPU backend: {_be}  \u2713 selftest passed")
+            else:
+                print(f"GPU backend: {_be}  \u2717 selftest FAILED ({_detail})")
+        else:
+            _forced = os.environ.get("MESHXCAD_CPU", "").lower() in (
+                "1", "true", "yes")
+            if _forced:
+                print("GPU backend: cpu (forced via MESHXCAD_CPU)")
+            else:
+                print("GPU backend: cpu (no GPU library found)")
+
     # Dispatch to subcommands
     _subcommand_dispatch = {
         "auto":           _run_auto,

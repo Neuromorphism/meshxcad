@@ -617,6 +617,36 @@ def _batch_hausdorff_gpu(candidates_verts, target_v):
 # Summary / diagnostics
 # ---------------------------------------------------------------------------
 
+def gpu_selftest():
+    """Run a short vector computation to verify the backend works end-to-end.
+
+    Returns (ok, detail) where *ok* is True if the backend produced the
+    correct answer and *detail* is a human-readable status string.
+    """
+    try:
+        # Small dot-product + nearest-neighbor check
+        a = np.array([[1.0, 2.0, 3.0],
+                       [4.0, 5.0, 6.0]], dtype=np.float64)
+        b = np.array([[1.0, 2.0, 3.0],
+                       [7.0, 8.0, 9.0]], dtype=np.float64)
+
+        # nearest_neighbors should map a[0]→b[0] (dist 0) and a[1]→b[0]
+        dists, idx = nearest_neighbors(a, b, k=1)
+
+        # a[0] is identical to b[0] → distance ≈ 0, index 0
+        if not (idx[0] == 0 and dists[0] < 1e-6):
+            return False, "nearest-neighbor returned wrong result for identical point"
+
+        # Also verify row_norms: ||[3,4]|| should be 5
+        norms = row_norms(np.array([[3.0, 4.0]], dtype=np.float64))
+        if abs(norms[0] - 5.0) > 1e-6:
+            return False, f"row_norms([3,4])={norms[0]:.6f}, expected 5.0"
+
+        return True, "ok"
+    except Exception as exc:
+        return False, str(exc)
+
+
 def gpu_info():
     """Return diagnostic info about the GPU backend."""
     info = {
