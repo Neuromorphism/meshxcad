@@ -721,6 +721,12 @@ def get_fixer_selector():
 try:
     from meshxcad.optim import FixerPrioritySelector as _FPS
     _FIXER_SELECTOR = _FPS(list(FIXERS.keys()))
+    # Load canonical weights if available (federated learning)
+    try:
+        from meshxcad.federation import load_canonical
+        load_canonical(fixer_selector=_FIXER_SELECTOR)
+    except Exception:
+        pass
 except Exception:
     _FIXER_SELECTOR = None
 

@@ -181,6 +181,7 @@ class SegmentationStrategySelector:
             self._init_heuristic_prior_np()
 
         self._history = []  # list of (features, strategy_idx, quality)
+        self._record_experiences = True  # auto-record for federation
 
     def _init_heuristic_prior(self):
         """Warm-start weights to approximate the existing heuristic rules."""
@@ -270,6 +271,15 @@ class SegmentationStrategySelector:
 
         self._history.append((feat_vec.copy(), strategy_idx, quality))
 
+        # Record for federated learning export
+        if self._record_experiences:
+            try:
+                from .federation import record_segmentation_experience
+                record_segmentation_experience(
+                    feat_vec, chosen_strategy, quality)
+            except ImportError:
+                pass
+
         if _HAS_TORCH:
             self._update_torch(feat_vec, strategy_idx, quality)
         else:
@@ -357,6 +367,7 @@ class FixerPrioritySelector:
         self.fixer_names = list(fixer_names)
         n = len(self.fixer_names)
         self.lr = lr
+        self._record_experiences = True  # auto-record for federation
 
         if _HAS_TORCH:
             # 3 global mixing weights + per-fixer bias
@@ -419,6 +430,17 @@ class FixerPrioritySelector:
         """
         if chosen_name not in self.fixer_names:
             return
+
+        # Record for federated learning export
+        if self._record_experiences:
+            try:
+                from .federation import record_fixer_experience
+                record_fixer_experience(
+                    self.fixer_names, chosen_name, diff_scores,
+                    tried_set, fixer_history, improved,
+                    improvement_amount)
+            except ImportError:
+                pass
 
         reward = improvement_amount if improved else -0.1
         idx = self.fixer_names.index(chosen_name)
