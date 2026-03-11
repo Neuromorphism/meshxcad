@@ -879,9 +879,14 @@ def _run_auto(args):
         out_dir = os.path.join(os.path.dirname(args.mesh) or ".", f"{base}_cad")
     os.makedirs(out_dir, exist_ok=True)
 
-    # Write program JSON
-    program_path = out_file if (out_file and out_file.endswith(".json")) \
-        else os.path.join(out_dir, "program.json")
+    # Write program JSON — alongside the CAD file with matching name when a
+    # specific output file was requested (e.g. result.step → result.json).
+    if out_file and out_file.endswith(".json"):
+        program_path = out_file
+    elif out_file:
+        program_path = os.path.splitext(out_file)[0] + ".json"
+    else:
+        program_path = os.path.join(out_dir, "program.json")
     program_out = {
         "program": result["program"],
         "accuracy": result["accuracy"],
@@ -1394,9 +1399,14 @@ examples — adding detail to an existing STEP file:
     )
 
     # --- Write outputs ---
-    # 1. CadProgram JSON
-    program_path = out_file if (out_file and out_file.endswith(".json")) \
-        else os.path.join(out_dir, "program.json")
+    # 1. CadProgram JSON — alongside the CAD file with matching name when a
+    # specific output file was requested (e.g. result.step → result.json).
+    if out_file and out_file.endswith(".json"):
+        program_path = out_file
+    elif out_file:
+        program_path = os.path.splitext(out_file)[0] + ".json"
+    else:
+        program_path = os.path.join(out_dir, "program.json")
     program_out = {
         "program": result["program"],
         "initial": result["initial"],
@@ -1410,7 +1420,7 @@ examples — adding detail to an existing STEP file:
     with open(program_path, "w") as f:
         json.dump(program_out, f, indent=2)
 
-    # 2. Output mesh STL
+    # 2. Output mesh (STL or STEP depending on output extension)
     if not args.json_only:
         prog_obj = result["_program_obj"]
         cad_v, cad_f = prog_obj.evaluate()
@@ -1419,8 +1429,14 @@ examples — adding detail to an existing STEP file:
                 mesh_path = out_file
             else:
                 mesh_path = os.path.join(out_dir, "output.stl")
-            from .stl_io import write_binary_stl
-            write_binary_stl(mesh_path, cad_v, cad_f)
+
+            mesh_ext = os.path.splitext(mesh_path)[1].lower()
+            if mesh_ext in _STEP_EXTS:
+                from .step_io import write_step
+                write_step(mesh_path, cad_v, cad_f)
+            else:
+                from .stl_io import write_binary_stl
+                write_binary_stl(mesh_path, cad_v, cad_f)
         else:
             mesh_path = None
     else:
