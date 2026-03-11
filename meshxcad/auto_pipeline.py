@@ -33,6 +33,11 @@ from scipy.spatial import KDTree
 from .gpu import AcceleratedKDTree as _AKDTree
 
 
+# Early-exit threshold: if accuracy reaches this level after any phase,
+# skip remaining expensive phases — the result is already excellent.
+EARLY_EXIT_ACCURACY = 0.99
+
+
 # ---------------------------------------------------------------------------
 # Federated learning: load canonical weights at module import time
 # ---------------------------------------------------------------------------
@@ -47,6 +52,61 @@ def _load_federation_weights():
         return False
 
 _federation_loaded = _load_federation_weights()
+
+
+def _maybe_early_exit(prog, target_v, target_f, phases, t_start, mode,
+                      best_strategy, library, verbose, score_accuracy,
+                      compute_elegance_score, threshold=EARLY_EXIT_ACCURACY):
+    """Check if accuracy already meets the early-exit threshold.
+
+    Returns the result dict if we should exit, or None to continue.
+    """
+    acc = score_accuracy(prog, target_v, target_f)
+    if acc < threshold:
+        return None
+
+    total_elapsed = time.time() - t_start
+    final_eleg = compute_elegance_score(prog, target_v, target_f)
+
+    if verbose:
+        print(f"\n  Early exit: accuracy {acc:.4f} >= {threshold} threshold")
+        print(f"  Result: {prog.summary()}")
+        print(f"    accuracy={acc:.4f}  elegance={final_eleg['total']:.4f}")
+        print(f"    {total_elapsed:.1f}s total")
+        # Print phase timing summary
+        _print_phase_timing(phases)
+
+    _record_pipeline_experience(
+        phases, acc, final_eleg, prog, target_v, target_f,
+        mode, best_strategy if mode == "scratch" else "provided",
+        library,
+    )
+
+    return {
+        "program": prog.to_dict(),
+        "_program_obj": prog,
+        "accuracy": round(acc, 4),
+        "elegance": {k: round(v, 4) for k, v in final_eleg.items()
+                     if isinstance(v, (int, float))},
+        "phases": phases,
+        "elapsed_sec": round(total_elapsed, 1),
+        "mode": mode,
+        "techniques": library.summary() if library else {},
+        "early_exit": True,
+    }
+
+
+def _print_phase_timing(phases):
+    """Print a timing summary table for all completed phases."""
+    if not phases:
+        return
+    total = sum(p.get("elapsed", 0) for p in phases)
+    print(f"\n  Phase timing breakdown ({total:.1f}s total):")
+    for p in phases:
+        elapsed = p.get("elapsed", 0)
+        pct = (elapsed / total * 100) if total > 0 else 0
+        name = p.get("phase", "?")
+        print(f"    {name:20s} {elapsed:6.1f}s  ({pct:4.1f}%)")
 
 
 def auto_pipeline(target_v, target_f, *,
@@ -182,13 +242,21 @@ def auto_pipeline(target_v, target_f, *,
     else:
         mode = "scratch"
 
-        # Strategy A: basic initial_program (always)
+        # Strategy A: basic initial_program (always, and cheapest)
         prog_basic = initial_program(target_v, target_f)
         acc_basic = score_accuracy(prog_basic, target_v, target_f)
         init_strategies["basic"] = (prog_basic, acc_basic)
 
+        # Short-circuit: if basic already meets the early-exit threshold,
+        # skip the more expensive initialization strategies entirely.
+        _skip_expensive_init = acc_basic >= EARLY_EXIT_ACCURACY
+        if _skip_expensive_init and verbose:
+            _log("init", f"basic strategy acc={acc_basic:.4f} >= "
+                 f"{EARLY_EXIT_ACCURACY}, skipping expensive strategies")
+
         # Strategy B: reconstruct_cad — shape-aware reconstruction
-        if cfg["use_reconstruct"] and shape_info is not None:
+        if (not _skip_expensive_init
+                and cfg["use_reconstruct"] and shape_info is not None):
             try:
                 from .reconstruct import reconstruct_cad
                 recon = reconstruct_cad(target_v, target_f,
@@ -205,7 +273,7 @@ def auto_pipeline(target_v, target_f, *,
                 pass
 
         # Strategy C: tracing reconstruction (segment → revolve/extrude/sweep)
-        if cfg["use_reconstruct"]:
+        if not _skip_expensive_init and cfg["use_reconstruct"]:
             try:
                 from .tracing import trace_reconstruct
                 trace_result = trace_reconstruct(target_v, target_f)
@@ -223,7 +291,7 @@ def auto_pipeline(target_v, target_f, *,
                 pass
 
         # Strategy D: diffusion strategy (for normal/thorough)
-        if cfg["diffusion_steps"] > 0:
+        if not _skip_expensive_init and cfg["diffusion_steps"] > 0:
             try:
                 from .diffusion_strategy import (
                     run_diffusion_strategy, DiffusionConfig)
@@ -268,6 +336,13 @@ def auto_pipeline(target_v, target_f, *,
                 tag = " ◀" if name == best_strategy else ""
                 _log("init", f"  {name}: acc={a:.4f}{tag}")
         _log("init", f"best={best_strategy}, acc={acc:.4f}, {prog.summary()}")
+
+    # Early exit after initialisation if accuracy is already excellent
+    result = _maybe_early_exit(
+        prog, target_v, target_f, phases, t_start, mode,
+        best_strategy, None, verbose, score_accuracy, compute_elegance_score)
+    if result is not None:
+        return result
 
     # ------------------------------------------------------------------
     # Phase 3: Coevolve (main optimisation)
@@ -319,6 +394,13 @@ def auto_pipeline(target_v, target_f, *,
                  f"acc={state.accuracy:.4f} eleg={state.elegance:.3f} "
                  f"ops={state.program.n_enabled()}")
 
+        # Early exit from coevolution if accuracy already excellent
+        if state.accuracy >= EARLY_EXIT_ACCURACY:
+            if verbose:
+                _log("coevolve", f"accuracy {state.accuracy:.4f} >= "
+                     f"{EARLY_EXIT_ACCURACY}, stopping early")
+            break
+
     prog = state.program
     acc_after_coevolve = score_accuracy(prog, target_v, target_f)
     phase_rec = {
@@ -329,6 +411,14 @@ def auto_pipeline(target_v, target_f, *,
         "elapsed": round(time.time() - phase_start, 2),
     }
     phases.append(phase_rec)
+
+    # Early exit after coevolution
+    result = _maybe_early_exit(
+        prog, target_v, target_f, phases, t_start, mode,
+        best_strategy, library, verbose, score_accuracy,
+        compute_elegance_score)
+    if result is not None:
+        return result
 
     # ------------------------------------------------------------------
     # Phase 3b: Diffusion refinement pass (normal/thorough only)
@@ -362,6 +452,14 @@ def auto_pipeline(target_v, target_f, *,
                  f"{acc_after_diff:.4f} ({tag}, "
                  f"{diff_info.get('n_improved', 0)} improvements)")
 
+        # Early exit after diffusion refinement
+        result = _maybe_early_exit(
+            prog, target_v, target_f, phases, t_start, mode,
+            best_strategy, library, verbose, score_accuracy,
+            compute_elegance_score)
+        if result is not None:
+            return result
+
     # ------------------------------------------------------------------
     # Phase 4+5: Segment uncovered regions and fill gaps
     # ------------------------------------------------------------------
@@ -391,6 +489,14 @@ def auto_pipeline(target_v, target_f, *,
         }
         phases.append(phase_rec)
 
+    # Early exit after gap filling
+    result = _maybe_early_exit(
+        prog, target_v, target_f, phases, t_start, mode,
+        best_strategy, library, verbose, score_accuracy,
+        compute_elegance_score)
+    if result is not None:
+        return result
+
     # ------------------------------------------------------------------
     # Phase 6: Refine all operations
     # ------------------------------------------------------------------
@@ -417,6 +523,14 @@ def auto_pipeline(target_v, target_f, *,
     phases.append(phase_rec)
     if verbose:
         _log("refine", f"acc {acc_before_refine:.4f} → {acc_after_refine:.4f}")
+
+    # Early exit after refinement
+    result = _maybe_early_exit(
+        prog, target_v, target_f, phases, t_start, mode,
+        best_strategy, library, verbose, score_accuracy,
+        compute_elegance_score)
+    if result is not None:
+        return result
 
     # ------------------------------------------------------------------
     # Phase 6b: Adaptive profile refinement (revolve/extrude operations)
@@ -530,6 +644,7 @@ def auto_pipeline(target_v, target_f, *,
         print(f"\nResult: {prog.summary()}")
         print(f"  accuracy={final_acc:.4f}  elegance={final_eleg['total']:.4f}")
         print(f"  {total_elapsed:.1f}s total")
+        _print_phase_timing(phases)
 
     # ------------------------------------------------------------------
     # Phase 9: Record experience for federated learning
