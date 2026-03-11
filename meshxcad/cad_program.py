@@ -100,21 +100,29 @@ def mesh_complexity(vertices, faces):
     else:
         n_comp = 1
 
-    # Curvature entropy
+    # Curvature entropy (vectorised — no Python loops over faces)
     curvature_entropy = 0.0
     if n_verts > 3 and n_faces > 0:
         try:
             angle_sum = np.zeros(n_verts)
-            for tri in faces:
-                for k in range(3):
-                    i, j, l = int(tri[k]), int(tri[(k + 1) % 3]), int(tri[(k + 2) % 3])
-                    v1 = vertices[j] - vertices[i]
-                    v2 = vertices[l] - vertices[i]
-                    len1 = np.linalg.norm(v1)
-                    len2 = np.linalg.norm(v2)
-                    if len1 > 1e-12 and len2 > 1e-12:
-                        cos_a = np.clip(np.dot(v1, v2) / (len1 * len2), -1, 1)
-                        angle_sum[i] += _math.acos(cos_a)
+            # Compute angles at each vertex of each face in bulk
+            for k in range(3):
+                i_idx = faces[:, k]
+                j_idx = faces[:, (k + 1) % 3]
+                l_idx = faces[:, (k + 2) % 3]
+                v1 = vertices[j_idx] - vertices[i_idx]  # (n_faces, 3)
+                v2 = vertices[l_idx] - vertices[i_idx]  # (n_faces, 3)
+                len1 = np.linalg.norm(v1, axis=1)
+                len2 = np.linalg.norm(v2, axis=1)
+                valid = (len1 > 1e-12) & (len2 > 1e-12)
+                cos_a = np.zeros(n_faces)
+                cos_a[valid] = np.clip(
+                    np.einsum('ij,ij->i', v1[valid], v2[valid])
+                    / (len1[valid] * len2[valid]),
+                    -1, 1)
+                angles = np.zeros(n_faces)
+                angles[valid] = np.arccos(cos_a[valid])
+                np.add.at(angle_sum, i_idx, angles)
             curvature = 2 * _math.pi - angle_sum
             n_bins = min(30, max(5, n_verts // 10))
             hist, _ = np.histogram(curvature, bins=n_bins, density=True)
