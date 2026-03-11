@@ -806,14 +806,24 @@ def _revolve_project(target_vertices, target_faces):
                     best_q = q
                     best_v = cv
 
-        # Surface profile: captures angular features
-        surf_fn = _build_surface_profile(tvd, r_xy, a_xy, z_lo, z_hi, zr)
-        for bm in ['full', 'adaptive']:
-            cv2 = _project_with(surf_fn, blend_mode=bm)
-            q2 = _measure_quality(cv2, tv)
-            if q2 > best_q:
-                best_q = q2
-                best_v = cv2
+        # Surface profile: captures angular features.
+        # Try multiple angular resolutions: 36 (fast, good for nearly-circular),
+        # and higher (96/128) for shapes with strong angular detail (crowns,
+        # flowing features).  The best result across all resolutions is kept.
+        for n_th in [36, 96, 128]:
+            # Skip very high resolutions if vertex density per cell is too low
+            n_z_est = min(100, max(20, len(tvd) // 20))
+            verts_per_cell = len(tvd) / max(n_th * n_z_est, 1)
+            if verts_per_cell < 0.5 and n_th > 36:
+                continue  # too sparse for this resolution
+            surf_fn = _build_surface_profile(tvd, r_xy, a_xy, z_lo, z_hi, zr,
+                                             n_theta=n_th)
+            for bm in ['full', 'adaptive']:
+                cv2 = _project_with(surf_fn, blend_mode=bm)
+                q2 = _measure_quality(cv2, tv)
+                if q2 > best_q:
+                    best_q = q2
+                    best_v = cv2
 
         # Spiral/barley-twist-aware de-twisted Fourier profile.
         # Detects if the mesh has a helical twist (e.g. barley-twist stem) and,
@@ -1097,15 +1107,21 @@ def _build_revolve_profile(vertices, radii, z_min, z_max, z_range,
     return profile_fn
 
 
-def _build_surface_profile(vertices, radii, angles, z_min, z_max, z_range):
+def _build_surface_profile(vertices, radii, angles, z_min, z_max, z_range,
+                            n_theta=36):
     """Build a 2D surface profile function r(theta, z) for asymmetric shapes.
 
     Creates a grid of (theta, z) bins and interpolates radii smoothly.
     Uses adaptive z-sampling based on actual vertex positions.
+
+    Args:
+        vertices: (N, 3) mesh vertices
+        radii:    (N,)   radial distances from z-axis
+        angles:   (N,)   azimuthal angles
+        z_min, z_max, z_range: height bounds
+        n_theta:  angular bins (36 default; 96–128 better for asymmetric shapes)
     """
     from scipy.interpolate import RegularGridInterpolator
-
-    n_theta = 36
 
     # Adaptive z-sampling: place more samples at actual vertex z-levels
     unique_z = np.unique(np.round(vertices[:, 2], 4))
@@ -1285,6 +1301,14 @@ def _detect_spiral_twist(vertices, n_slices=25):
         # Require at least a quarter-turn total twist to count as a spiral
         abs_total_twist = abs(rate) * z_range
         if abs_total_twist < (math.pi / 2):
+            continue
+
+        # Require high R² (≥0.90): shapes with structural asymmetry (e.g.
+        # bilateral crowns) can produce a moderate linear fit (R² ≈ 0.8) that
+        # mimics a twist, but real spirals have very clean phase linearity
+        # (R² ≥ 0.99).  Threshold at 0.90 rejects false positives while still
+        # accepting noisy real spirals.
+        if r2 < 0.90:
             continue
 
         # Score: R² weighted by coverage of the spiral region.
