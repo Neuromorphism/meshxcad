@@ -9,11 +9,18 @@ Usage:
     python -m meshxcad mesh.stl --sweeps 20          # more optimisation rounds
     python -m meshxcad mesh.stl --fast               # quick 1-sweep check
 
+    # Full-control add-detail to STEP:
+    python -m meshxcad auto mesh.stl -c plain.step --sweeps 30 --rounds 10
+    python -m meshxcad auto mesh.stl -c plain.step --gap-passes 3 --no-fillets
+    python -m meshxcad auto mesh.stl -c plain.step -o result.step --render
+
 The tool:
   1. Loads a target mesh (STL / OBJ / PLY / STEP / IGES)
   2. Optionally loads a starting CAD (JSON program or STEP/IGES file)
-  3. Runs the coevolution loop (discriminator + elegance) until convergence
-  4. Writes: optimised CadProgram JSON, output mesh STL, and a summary
+  3. Runs the full pipeline: analyse, initialise, coevolve, diffusion refine,
+     segment + fill gaps, per-op refine, profile refine, fillets, final sweep,
+     mesh polish — each phase configurable via CLI flags
+  4. Writes: optimised CadProgram JSON, output mesh (STL or STEP), and a summary
 """
 
 import argparse
@@ -782,6 +789,7 @@ def _run_auto(args):
         if not args.quiet:
             print(f"Loading starting CAD from {args.cad}...")
 
+        deflection = getattr(args, "deflection", 0.1)
         if _is_step_file(args.cad):
             initial_cad = _load_cad_from_step(args.cad, target_v, target_f,
                                                quiet=args.quiet)
@@ -809,9 +817,42 @@ def _run_auto(args):
     else:
         thoroughness = "normal"
 
+    # Build overrides dict from CLI arguments
+    overrides = {}
+    if getattr(args, "sweeps", None) is not None:
+        overrides["sweeps"] = args.sweeps
+    if getattr(args, "rounds", None) is not None:
+        overrides["rounds"] = args.rounds
+    if getattr(args, "patience", None) is not None:
+        overrides["patience"] = args.patience
+    if getattr(args, "refine_iter", None) is not None:
+        overrides["refine_iter"] = args.refine_iter
+    if getattr(args, "gap_passes", None) is not None:
+        overrides["gap_passes"] = args.gap_passes
+    if getattr(args, "diffusion_steps", None) is not None:
+        overrides["diffusion_steps"] = args.diffusion_steps
+    if getattr(args, "no_diffusion", False):
+        overrides["no_diffusion"] = True
+    if getattr(args, "no_fillets", False):
+        overrides["no_fillets"] = True
+    if getattr(args, "no_profile_refine", False):
+        overrides["no_profile_refine"] = True
+    if getattr(args, "no_polish", False):
+        overrides["no_polish"] = True
+    if getattr(args, "no_final_sweep", False):
+        overrides["final_sweep"] = False
+    if getattr(args, "seg_strategy", None) is not None:
+        overrides["segmentation_strategy"] = args.seg_strategy
+    if getattr(args, "seed", None) is not None:
+        overrides["seed"] = args.seed
+
     if not args.quiet:
         mode = "adding detail" if initial_cad else "from scratch"
-        print(f"\nAuto pipeline ({mode}, {thoroughness})")
+        override_str = ""
+        if overrides:
+            override_items = [f"{k}={v}" for k, v in overrides.items()]
+            override_str = f", overrides: {', '.join(override_items)}"
+        print(f"\nAuto pipeline ({mode}, {thoroughness}{override_str})")
         print("=" * 50)
 
     result = auto_pipeline(
@@ -819,6 +860,7 @@ def _run_auto(args):
         initial_cad=initial_cad,
         thoroughness=thoroughness,
         verbose=not args.quiet,
+        overrides=overrides or None,
     )
 
     # Output: if -o looks like a file (has extension), write there directly;
@@ -852,7 +894,7 @@ def _run_auto(args):
     with open(program_path, "w") as f:
         json.dump(program_out, f, indent=2)
 
-    # Write output mesh
+    # Write output mesh (STL or STEP depending on output extension)
     prog_obj = result["_program_obj"]
     cad_v, cad_f = prog_obj.evaluate()
     mesh_path = None
@@ -861,8 +903,32 @@ def _run_auto(args):
             mesh_path = out_file
         else:
             mesh_path = os.path.join(out_dir, "output.stl")
-        from .stl_io import write_binary_stl
-        write_binary_stl(mesh_path, cad_v, cad_f)
+
+        mesh_ext = os.path.splitext(mesh_path)[1].lower()
+        if mesh_ext in _STEP_EXTS:
+            from .step_io import write_step
+            write_step(mesh_path, cad_v, cad_f)
+        else:
+            from .stl_io import write_binary_stl
+            write_binary_stl(mesh_path, cad_v, cad_f)
+
+    # Render comparison image if requested
+    if getattr(args, "render", False) and len(cad_v) > 0:
+        try:
+            from .render import render_comparison, HAS_MPL
+            if HAS_MPL:
+                comp_path = os.path.join(out_dir, "comparison.png")
+                meshes = [(target_v, target_f), (cad_v, cad_f)]
+                labels = ["Target Mesh", "CAD Result"]
+                render_comparison(meshes, labels, comp_path,
+                                  title="MeshXCAD Auto Pipeline Result")
+                if not args.quiet:
+                    print(f"  {comp_path}")
+            elif not args.quiet:
+                print("  (matplotlib not available, skipping comparison image)")
+        except Exception as e:
+            if not args.quiet:
+                print(f"  (comparison image failed: {e})")
 
     if not args.quiet:
         print(f"\nOutput:")
@@ -969,8 +1035,18 @@ def main():
 auto pipeline (recommended):
   python -m meshxcad auto part.stl                # full auto, all capabilities
   python -m meshxcad auto part.stl -c draft.json  # add detail to existing CAD
+  python -m meshxcad auto part.stl -c plain.step  # add detail from STEP file
   python -m meshxcad auto part.stl --thorough     # thorough mode
   python -m meshxcad auto part.stl --fast         # quick mode
+
+  fine-grained control (add detail to STEP):
+  python -m meshxcad auto part.stl -c plain.step --sweeps 30 --rounds 10
+  python -m meshxcad auto part.stl -c plain.step --gap-passes 3 --refine-iter 50
+  python -m meshxcad auto part.stl -c plain.step --no-fillets --no-polish
+  python -m meshxcad auto part.stl -c plain.step --seg-strategy skeleton
+  python -m meshxcad auto part.stl -c plain.step --diffusion-steps 50
+  python -m meshxcad auto part.stl -c plain.step -o result.step --render
+  python -m meshxcad auto part.stl -c draft.json --seed 123 --patience 5
 
 legacy single-pass:
   python -m meshxcad part.stl                     # coevolution only
@@ -1082,21 +1158,80 @@ gpu:
 
     # auto: full automated pipeline
     auto_p = subparsers.add_parser("auto",
-                                    help="Full automated pipeline using all capabilities")
+                                    help="Full automated pipeline using all capabilities",
+                                    formatter_class=argparse.RawDescriptionHelpFormatter,
+                                    epilog="""\
+examples — adding detail to an existing STEP file:
+  python -m meshxcad auto target.stl -c plain.step
+  python -m meshxcad auto target.stl -c plain.step --sweeps 30 --rounds 10
+  python -m meshxcad auto target.stl -c plain.step --thorough --gap-passes 3
+  python -m meshxcad auto target.stl -c draft.json --no-fillets --no-polish
+  python -m meshxcad auto target.stl -c plain.step -o result.step --render
+  python -m meshxcad auto target.stl -c plain.step --seg-strategy skeleton
+  python -m meshxcad auto target.stl -c plain.step --diffusion-steps 50
+""")
     auto_p.add_argument("mesh", help="Target mesh file (STL/OBJ/PLY/STEP/IGES)")
     auto_p.add_argument("-c", "--cad", default=None,
                          help="Starting CAD: JSON program or STEP/IGES file. "
                               "If provided, adds detail to this program.")
     auto_p.add_argument("-o", "--output", default=None,
-                         help="Output directory (default: <mesh>_cad/)")
+                         help="Output path: directory, or file with extension "
+                              "(.stl/.step/.stp/.json)")
+    # Thoroughness presets
     auto_p.add_argument("--fast", action="store_true",
                          help="Quick mode: fewer sweeps, no gap-filling")
     auto_p.add_argument("--thorough", action="store_true",
                          help="Thorough mode: more sweeps, multiple gap-fill passes")
+    # Fine-grained coevolution control
+    auto_p.add_argument("--sweeps", type=int, default=None,
+                         help="Max coevolution sweeps (overrides preset)")
+    auto_p.add_argument("-r", "--rounds", type=int, default=None,
+                         help="Inner mutation rounds per sweep (overrides preset)")
+    auto_p.add_argument("--patience", type=int, default=None,
+                         help="Stop after N no-improvement sweeps (overrides preset)")
+    # Refinement control
+    auto_p.add_argument("--refine-iter", type=int, default=None,
+                         help="Max refinement iterations per operation "
+                              "(overrides preset)")
+    # Gap filling
+    auto_p.add_argument("--gap-passes", type=int, default=None,
+                         help="Number of gap-filling passes (overrides preset; "
+                              "0 to disable)")
+    auto_p.add_argument("--seg-strategy", default=None,
+                         choices=["auto", "skeleton", "sdf", "convexity",
+                                  "projection", "normal_cluster"],
+                         help="Segmentation strategy for gap-fill regions "
+                              "(default: auto)")
+    # Diffusion
+    auto_p.add_argument("--diffusion-steps", type=int, default=None,
+                         help="Number of diffusion refinement steps "
+                              "(overrides preset; 0 to disable)")
+    auto_p.add_argument("--no-diffusion", action="store_true",
+                         help="Disable diffusion refinement entirely")
+    # Phase toggles
+    auto_p.add_argument("--no-fillets", action="store_true",
+                         help="Skip fillet detection and addition phase")
+    auto_p.add_argument("--no-profile-refine", action="store_true",
+                         help="Skip adaptive profile refinement phase")
+    auto_p.add_argument("--no-polish", action="store_true",
+                         help="Skip mesh polishing phase (smoothing, "
+                              "edge sharpening, hole filling)")
+    auto_p.add_argument("--no-final-sweep", action="store_true",
+                         help="Skip the final coevolution cleanup sweep")
+    # STEP tessellation
+    auto_p.add_argument("--deflection", type=float, default=0.1,
+                         help="Tessellation linear deflection for STEP/IGES input "
+                              "(smaller = finer, default: 0.1)")
+    # Output options
     auto_p.add_argument("-q", "--quiet", action="store_true",
-                         help="Suppress progress output")
+                         help="Suppress progress output (machine-readable JSON)")
     auto_p.add_argument("--json-only", action="store_true",
-                         help="Only output JSON (no mesh STL)")
+                         help="Only output JSON (no mesh STL/STEP)")
+    auto_p.add_argument("--render", action="store_true",
+                         help="Generate comparison image (requires matplotlib)")
+    # Reproducibility
+    auto_p.add_argument("--seed", type=int, default=None,
+                         help="Random seed for reproducibility (default: 42)")
 
     # gpu: show backend status
     gpu_p = subparsers.add_parser("gpu",

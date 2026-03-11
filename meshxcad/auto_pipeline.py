@@ -52,7 +52,8 @@ _federation_loaded = _load_federation_weights()
 def auto_pipeline(target_v, target_f, *,
                   initial_cad=None,
                   thoroughness="normal",
-                  verbose=True):
+                  verbose=True,
+                  overrides=None):
     """Run the full automated mesh-to-CAD pipeline.
 
     Args:
@@ -62,6 +63,10 @@ def auto_pipeline(target_v, target_f, *,
                      If None, builds from scratch. If provided, adds detail.
         thoroughness: "quick", "normal", or "thorough"
         verbose: print progress
+        overrides: optional dict of config overrides.  Supported keys:
+            sweeps, rounds, patience, refine_iter, gap_passes, final_sweep,
+            diffusion_steps, use_reconstruct, no_fillets, no_profile_refine,
+            no_polish, no_diffusion, segmentation_strategy, seed.
 
     Returns:
         dict with:
@@ -94,6 +99,29 @@ def auto_pipeline(target_v, target_f, *,
                      "diffusion_steps": 50, "use_reconstruct": True},
     }
     cfg = presets.get(thoroughness, presets["normal"])
+
+    # Apply CLI overrides on top of the thoroughness preset
+    if overrides:
+        for key in ("sweeps", "rounds", "patience", "refine_iter",
+                     "gap_passes", "diffusion_steps"):
+            if overrides.get(key) is not None:
+                cfg[key] = overrides[key]
+        if overrides.get("final_sweep") is not None:
+            cfg["final_sweep"] = overrides["final_sweep"]
+        if overrides.get("use_reconstruct") is not None:
+            cfg["use_reconstruct"] = overrides["use_reconstruct"]
+        if overrides.get("no_diffusion"):
+            cfg["diffusion_steps"] = 0
+        if overrides.get("no_fillets"):
+            cfg["_no_fillets"] = True
+        if overrides.get("no_profile_refine"):
+            cfg["_no_profile_refine"] = True
+        if overrides.get("no_polish"):
+            cfg["_no_polish"] = True
+        if overrides.get("segmentation_strategy"):
+            cfg["_seg_strategy"] = overrides["segmentation_strategy"]
+        if overrides.get("seed") is not None:
+            cfg["_seed"] = overrides["seed"]
     phases = []
 
     def _log(phase_name, msg):
@@ -264,7 +292,7 @@ def auto_pipeline(target_v, target_f, *,
     state.initial_accuracy = state.accuracy
 
     library = TechniqueLibrary()
-    rng = np.random.RandomState(42)
+    rng = np.random.RandomState(cfg.get("_seed", 42))
     no_improvement = 0
     n_sweeps = 0
 
@@ -340,7 +368,8 @@ def auto_pipeline(target_v, target_f, *,
     for gap_pass in range(cfg["gap_passes"]):
         phase_start = time.time()
         acc_before_gaps = score_accuracy(prog, target_v, target_f)
-        added = _fill_gaps(prog, target_v, target_f, budget, verbose)
+        added = _fill_gaps(prog, target_v, target_f, budget, verbose,
+                           seg_strategy=cfg.get("_seg_strategy"))
 
         if added > 0:
             acc_after_gaps = score_accuracy(prog, target_v, target_f)
@@ -392,7 +421,7 @@ def auto_pipeline(target_v, target_f, *,
     # ------------------------------------------------------------------
     # Phase 6b: Adaptive profile refinement (revolve/extrude operations)
     # ------------------------------------------------------------------
-    if thoroughness != "quick":
+    if thoroughness != "quick" and not cfg.get("_no_profile_refine"):
         phase_start = time.time()
         acc_before_profile = score_accuracy(prog, target_v, target_f)
         profile_improved = _refine_profiles(prog, target_v, target_f, verbose)
@@ -424,7 +453,7 @@ def auto_pipeline(target_v, target_f, *,
     # ------------------------------------------------------------------
     phase_start = time.time()
     fillets_added = 0
-    if prog.n_enabled() >= 2:
+    if prog.n_enabled() >= 2 and not cfg.get("_no_fillets"):
         fillets_added = _add_fillets(prog, target_v, target_f, verbose)
 
     phase_rec = {
@@ -471,7 +500,7 @@ def auto_pipeline(target_v, target_f, *,
     # ------------------------------------------------------------------
     # Phase 8b: Mesh polish — smooth, sharpen edges, fill holes
     # ------------------------------------------------------------------
-    if thoroughness != "quick":
+    if thoroughness != "quick" and not cfg.get("_no_polish"):
         phase_start = time.time()
         acc_before_polish = score_accuracy(prog, target_v, target_f)
         polish_info = _polish_output_mesh(prog, target_v, target_f, verbose)
@@ -695,13 +724,18 @@ def _run_diffusion_refinement(prog, target_v, target_f, cfg, verbose):
 # Gap-filling: find uncovered target regions and add primitives
 # ---------------------------------------------------------------------------
 
-def _fill_gaps(program, target_v, target_f, budget, verbose):
+def _fill_gaps(program, target_v, target_f, budget, verbose,
+               seg_strategy=None):
     """Find uncovered target regions and try to fill them with new ops.
 
     Uses learned segmentation strategy selection when available to pick
     the best decomposition approach for the uncovered region, and tries
     advanced shape types (revolve, extrude, profiled_cylinder) in addition
     to basic primitives.
+
+    Args:
+        seg_strategy: optional segmentation strategy override
+            (auto/skeleton/sdf/convexity/projection/normal_cluster)
 
     Returns number of operations added.
     """
