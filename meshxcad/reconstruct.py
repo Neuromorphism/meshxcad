@@ -1731,11 +1731,15 @@ def _classify_component(vertices, faces, bbox_diag_total):
     aspect = sorted_dims[0] / max(sorted_dims[1], 1e-12)
 
     # Classification logic
-    if flatness > 5.0 and elongation < 3.0:
+    # Wings: extremely flat components (flatness > 12 means nearly 2D)
+    if flatness > 12.0 and elongation < 4.0:
         return {"component_type": "wing", "shape_type": "freeform",
                 "elongation": elongation, "flatness": flatness}
 
-    if elongation > 2.0 or aspect > 2.5:
+    # Tentacles: very highly elongated components (elongation > 4.0)
+    # Threshold is set high to avoid classifying tall symmetric shapes
+    # (like chess pieces, vases, columns) as tentacles
+    if elongation > 4.0 or aspect > 5.0:
         return {"component_type": "tentacle", "shape_type": "sweep",
                 "elongation": elongation}
 
@@ -1772,6 +1776,54 @@ def reconstruct_composite(vertices, faces):
         return None
 
     bbox_diag = float(np.linalg.norm(v.max(axis=0) - v.min(axis=0)))
+
+    # Filter out tiny artifact components (mesh noise, floating fragments)
+    # A component is "significant" if it has >= 3% of total vertices
+    # and its bounding box is >= 5% of the total mesh diagonal
+    total_verts = len(v)
+    significant = []
+    for comp_v, comp_f, orig_idx in components:
+        comp_bbox_diag = float(np.linalg.norm(
+            comp_v.max(axis=0) - comp_v.min(axis=0)))
+        is_significant = (len(comp_v) >= total_verts * 0.03 and
+                          comp_bbox_diag >= bbox_diag * 0.05)
+        if is_significant:
+            significant.append((comp_v, comp_f, orig_idx))
+
+    # If only 0 or 1 significant components, not truly composite
+    if len(significant) <= 1:
+        return None
+
+    # If only 0 or 1 significant components, not truly composite
+    if len(significant) <= 1:
+        return None
+
+    # Check if this is a genuinely composite shape (distinct structural parts)
+    # vs a mesh with disconnected segments that form a single logical shape.
+    # Strategy: classify each component and check for structural diversity.
+    # If all significant components have the same type, it's likely a
+    # fragmented single shape. Composite mode is most useful when there's
+    # structural variety (e.g., body + tentacles).
+    n_sig = len(significant)
+    comp_types = []
+    for cv, cf, idx in significant:
+        cls = _classify_component(cv, cf, bbox_diag)
+        comp_types.append(cls["component_type"])
+
+    unique_types = set(comp_types)
+    # If all components are the same type (all body, all detail, etc),
+    # and they form a coherent arrangement, skip composite
+    if len(unique_types) == 1:
+        return None
+
+    # Also skip if no tentacles detected - the main benefit of composite
+    # is per-component sweep for elongated parts.  Wings alone don't
+    # justify decomposition since they could be flat base plates.
+    if "tentacle" not in unique_types:
+        return None
+
+    # Replace components with only significant ones
+    components = significant
 
     all_cad_v = []
     all_cad_f = []

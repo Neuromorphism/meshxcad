@@ -1,15 +1,15 @@
 {
   "name": "scenevr",
-  "shape_type": "revolve",
-  "accuracy": 1.0,
-  "quality": 1.0,
-  "forward_coverage": 1.0,
-  "backward_coverage": 1.0,
+  "shape_type": "composite",
+  "accuracy": 0.9482,
+  "quality": 0.948,
+  "forward_coverage": 0.9115,
+  "backward_coverage": 0.9849,
   "target_verts": 754,
   "target_faces": 1440,
-  "cad_verts": 754,
-  "cad_faces": 1440,
-  "elapsed_sec": 0.57,
-  "hausdorff": 0.0,
-  "mean_symmetric": 0.0
+  "cad_verts": 1571,
+  "cad_faces": 3032,
+  "elapsed_sec": 0.52,
+  "hausdorff": 6.9866,
+  "mean_symmetric": 1.1995
 }

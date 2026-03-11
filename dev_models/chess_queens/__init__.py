@@ -15,9 +15,11 @@ Sources:
     openscad_hillary_queen— chrisrobison/openscad-chess (hillary variant)
     openscad_jib_queen   — chrisrobison/openscad-chess (jib variant)
     openscad_trump_queen — chrisrobison/openscad-chess (trump variant)
+    decent_queen         — RLuckom/decent-chess
     scenevr_queen        — scenevr/chess (OBJ format)
     smycynek_queen       — smycynek/chess-puzzles-3d (OBJ format)
     stevenalbert_queen   — stevenalbert/3d-chess-opengl (OBJ format)
+    bnolin_queen         — Bnolin/3D-Chess-Game (OBJ format)
 """
 
 import os
@@ -109,9 +111,11 @@ QUEEN_FILES = {
     "openscad_hillary": "openscad_hillary_queen.stl",
     "openscad_jib":     "openscad_jib_queen.stl",
     "openscad_trump":   "openscad_trump_queen.stl",
+    "decent":           "decent_queen.stl",
     "scenevr":          "scenevr_queen.obj",
     "smycynek":         "smycynek_queen.obj",
     "stevenalbert":     "stevenalbert_queen.obj",
+    "bnolin":           "bnolin_queen.obj",
 }
 
 
