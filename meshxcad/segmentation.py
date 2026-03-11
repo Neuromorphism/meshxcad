@@ -784,7 +784,10 @@ def _extract_sweep_path_and_profile(segment):
     f = segment.faces
 
     # Extract skeleton path
-    path = extract_mesh_skeleton(v, f)
+    skel_result = extract_mesh_skeleton(v, f)
+    if skel_result is None:
+        return
+    path, _skel_axis = skel_result
     if path is None or len(path) < 2:
         return
 

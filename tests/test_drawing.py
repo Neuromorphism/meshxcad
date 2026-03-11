@@ -9,6 +9,8 @@ from meshxcad.drawing import (
     render_orthographic,
     render_drawing_sheet,
     extract_visible_edges,
+    _compute_mesh_dimensions,
+    _get_view_dimensions,
 )
 from meshxcad.drawing_compare import (
     compare_drawings,
@@ -336,3 +338,94 @@ class TestDrawingToCad:
         spec = DrawingSpec()
         prog = drawing_to_cad(spec)
         assert prog.n_enabled() >= 1
+
+
+# ===================================================================
+# TestDimensionAnnotations
+# ===================================================================
+
+class TestDimensionAnnotations:
+
+    def test_compute_box_dimensions(self):
+        """Bounding box dimensions for a cube."""
+        v, f = make_cube_mesh(10.0, 4)
+        dims = _compute_mesh_dimensions(v, f)
+        assert abs(dims["width"] - 10.0) < 0.5
+        assert abs(dims["height"] - 10.0) < 0.5
+        assert abs(dims["depth"] - 10.0) < 0.5
+        assert dims["is_cylindrical"] is False
+
+    def test_compute_cylinder_dimensions(self):
+        """Cylinder should be detected as cylindrical with correct diameter."""
+        v, f = make_cylinder_mesh(5.0, 15.0, 24, 10)
+        dims = _compute_mesh_dimensions(v, f)
+        assert dims["is_cylindrical"] is True
+        assert abs(dims["diameter"] - 10.0) < 0.5
+        assert abs(dims["height"] - 15.0) < 0.5
+
+    def test_get_view_dimensions_front_box(self):
+        """Front view of box: horizontal=width, vertical=height."""
+        dims = {"width": 20.0, "depth": 10.0, "height": 15.0,
+                "is_cylindrical": False, "diameter": None}
+        anns = _get_view_dimensions(dims, "front")
+        assert len(anns) == 2
+        horiz = [a for a in anns if a["orientation"] == "horizontal"]
+        vert = [a for a in anns if a["orientation"] == "vertical"]
+        assert len(horiz) == 1
+        assert horiz[0]["value"] == 20.0
+        assert vert[0]["value"] == 15.0
+
+    def test_get_view_dimensions_top_box(self):
+        """Top view of box: horizontal=width, vertical=depth."""
+        dims = {"width": 20.0, "depth": 10.0, "height": 15.0,
+                "is_cylindrical": False, "diameter": None}
+        anns = _get_view_dimensions(dims, "top")
+        horiz = [a for a in anns if a["orientation"] == "horizontal"]
+        vert = [a for a in anns if a["orientation"] == "vertical"]
+        assert horiz[0]["value"] == 20.0
+        assert vert[0]["value"] == 10.0
+
+    def test_get_view_dimensions_cylinder_front(self):
+        """Front view of cylinder: horizontal=diameter, vertical=height."""
+        dims = {"width": 10.0, "depth": 10.0, "height": 15.0,
+                "is_cylindrical": True, "diameter": 10.0}
+        anns = _get_view_dimensions(dims, "front")
+        horiz = [a for a in anns if a["orientation"] == "horizontal"]
+        assert horiz[0]["value"] == 10.0
+        assert horiz[0]["label"] == "diameter"
+
+    def test_annotated_render_has_more_pixels(self):
+        """Annotated image should have more dark pixels than plain."""
+        v, f = make_cube_mesh(10.0, 4)
+        plain = render_orthographic(v, f, "front", 256, annotate=False)
+        annotated = render_orthographic(v, f, "front", 256, annotate=True)
+        assert plain.shape == annotated.shape
+        dark_plain = np.sum(plain < 128)
+        dark_annot = np.sum(annotated < 128)
+        assert dark_annot > dark_plain, "Annotated image should have more drawn content"
+
+    def test_annotated_sheet(self):
+        """render_drawing_sheet with annotate=True should produce valid output."""
+        v, f = make_cylinder_mesh(5.0, 15.0, 24, 10)
+        sheet = render_drawing_sheet(v, f, ("front", "side", "top"), 256,
+                                      annotate=True)
+        assert sheet.ndim == 3
+        assert sheet.shape[2] == 3
+        # Should have more dark pixels than non-annotated version
+        plain_sheet = render_drawing_sheet(v, f, ("front", "side", "top"), 256,
+                                            annotate=False)
+        assert np.sum(sheet < 128) > np.sum(plain_sheet < 128)
+
+    def test_annotated_render_size_unchanged(self):
+        """Annotated image should have same dimensions as plain."""
+        v, f = make_cube_mesh(10.0, 4)
+        for size in (128, 256, 512):
+            img = render_orthographic(v, f, "front", size, annotate=True)
+            assert img.shape == (size, size)
+
+    def test_annotate_false_is_default(self):
+        """Default annotate=False should produce same output as explicit False."""
+        v, f = make_cube_mesh(10.0, 4)
+        default = render_orthographic(v, f, "front", 256)
+        explicit = render_orthographic(v, f, "front", 256, annotate=False)
+        np.testing.assert_array_equal(default, explicit)

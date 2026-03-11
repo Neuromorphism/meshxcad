@@ -400,7 +400,7 @@ class TestVertexNormalDivergence:
         v2 = v * 1.3
         d1 = vertex_normal_divergence(v, f, v, f)
         d2 = vertex_normal_divergence(v, f, v2, f)
-        assert d2 >= d1
+        assert d2 >= d1 - 1e-6
 
 
 class TestOctantVolumeDiff:

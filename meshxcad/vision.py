@@ -157,14 +157,15 @@ class DrawingInterpreter:
         """Stage 1: What is depicted and which views are present?"""
         prompt = (
             "This is a mechanical engineering drawing showing orthographic views "
-            "of a part. Describe:\n"
-            "1. What type of part is shown (e.g., shaft, flange, bracket, gear)?\n"
+            "of a part. Answer these questions:\n"
+            "1. What type of part is shown (e.g., shaft, flange, bracket, gear, cylinder)?\n"
             "2. What views are present (front, side, top, section, isometric)?\n"
             "3. Is the part axially symmetric, bilaterally symmetric, or asymmetric?\n"
             "4. Approximate overall dimensions if visible.\n\n"
-            'Reply ONLY as JSON: {"object_type": "...", "views": ["front", ...], '
-            '"symmetry": "axial|bilateral|none", "description": "...", '
-            '"overall_size": [width, height, depth]}'
+            "IMPORTANT: Reply with ONLY a JSON object, no other text. Example:\n"
+            '{"object_type": "cylinder", "views": ["front", "side", "top"], '
+            '"symmetry": "axial", "description": "A cylindrical shaft", '
+            '"overall_size": [50, 100, 50]}'
         )
         response = self._generate(image, prompt)
         result = self._parse_json_response(response)
@@ -188,8 +189,9 @@ class DrawingInterpreter:
             "- measurement type (diameter, height, width, radius, depth, angle)\n"
             "- which feature it belongs to (body, bore, hole_1, flange_od, etc.)\n"
             "- which view it appears in\n\n"
-            'Reply ONLY as JSON array: [{"value": ..., "unit": "mm", '
-            '"measurement": "...", "feature": "...", "view": "..."}, ...]'
+            "IMPORTANT: Reply with ONLY a JSON array, no other text. Example:\n"
+            '[{"value": 50, "unit": "mm", "measurement": "diameter", '
+            '"feature": "body", "view": "front"}]'
         )
         response = self._generate(image, prompt)
         raw = self._parse_json_response(response)
@@ -233,10 +235,11 @@ class DrawingInterpreter:
             "- extent_2d: [w, h] bounding box as fraction of view\n"
             "- through: true/false (for holes)\n"
             "- dimensions: which dimension values apply to this feature\n\n"
-            'Reply ONLY as JSON: {"views": [{"view_type": "front", '
-            '"features": [{"feature_type": "...", "center_2d": [x,y], '
-            '"extent_2d": [w,h], "through": false, '
-            '"dimensions": [{"value": ..., "measurement": "..."}]}]}]}'
+            "IMPORTANT: Reply with ONLY a JSON object, no other text. Example:\n"
+            '{"views": [{"view_type": "front", '
+            '"features": [{"feature_type": "cylinder", "center_2d": [0.5, 0.5], '
+            '"extent_2d": [0.8, 0.9], "through": false, '
+            '"dimensions": [{"value": 50, "measurement": "diameter"}]}]}]}'
         )
         response = self._generate(image, prompt)
         raw = self._parse_json_response(response)
@@ -292,8 +295,17 @@ class DrawingInterpreter:
                 views.append(ViewSpec(view_type=v))
 
         overall = scene.get("overall_size", [1, 1, 1])
-        if len(overall) < 3:
-            overall = list(overall) + [1] * (3 - len(overall))
+        if not isinstance(overall, (list, tuple)):
+            overall = [1, 1, 1]
+        # Sanitise: replace None/non-numeric with 1
+        clean_overall = []
+        for x in overall:
+            try:
+                clean_overall.append(float(x))
+            except (TypeError, ValueError):
+                clean_overall.append(1.0)
+        while len(clean_overall) < 3:
+            clean_overall.append(1.0)
 
         # Cross-reference: average close dimension values across views
         dims_merged = self._merge_dimensions(dimensions)
@@ -304,7 +316,7 @@ class DrawingInterpreter:
             views=views,
             dimensions=dims_merged,
             symmetry=scene.get("symmetry", "none"),
-            overall_size=tuple(float(x) for x in overall[:3]),
+            overall_size=tuple(clean_overall[:3]),
         )
 
     def _merge_dimensions(self, dimensions: list) -> list:
@@ -352,5 +364,79 @@ class DrawingInterpreter:
                 except json.JSONDecodeError:
                     continue
 
+        # Fallback: try to extract structured info from markdown/text
+        result = self._parse_markdown_fallback(text)
+        if result:
+            return result
+
         logger.warning("Failed to parse JSON from response: %s...", text[:200])
         return {}
+
+    def _parse_markdown_fallback(self, text: str) -> dict | None:
+        """Try to extract structured info from markdown-formatted LLM output."""
+        result = {}
+
+        # Extract object type
+        type_match = re.search(
+            r'(?:type|part|object|shows?\s+a)\s*(?:of\s+(?:part\s+)?)?'
+            r'(?:is\s+)?(?:a\s+)?[:\-]?\s*(\w[\w\s]*\w)',
+            text, re.IGNORECASE
+        )
+        if type_match:
+            result["object_type"] = type_match.group(1).strip().lower()
+
+        # Extract views
+        views = []
+        for v in ("front", "side", "top", "bottom", "section", "isometric"):
+            if re.search(rf'\b{v}\b', text, re.IGNORECASE):
+                views.append(v)
+        if views:
+            result["views"] = views
+
+        # Extract symmetry
+        if re.search(r'axial(?:ly)?\s*symmetric', text, re.IGNORECASE):
+            result["symmetry"] = "axial"
+        elif re.search(r'bilateral(?:ly)?\s*symmetric', text, re.IGNORECASE):
+            result["symmetry"] = "bilateral"
+        else:
+            result["symmetry"] = "none"
+
+        # Extract dimensions (number + unit patterns)
+        dims = []
+        for m in re.finditer(
+            r'(\w[\w\s]*?)\s*(?::\s*|=\s*|is\s+)(\d+(?:\.\d+)?)\s*(mm|in|cm)',
+            text, re.IGNORECASE
+        ):
+            label = m.group(1).strip().lower()
+            value = float(m.group(2))
+            unit = m.group(3).lower()
+            if unit == "cm":
+                value *= 10
+                unit = "mm"
+            measurement = ""
+            for mtype in ("diameter", "height", "width", "radius", "depth",
+                          "length", "thickness"):
+                if mtype in label:
+                    measurement = mtype
+                    break
+            dims.append({
+                "value": value, "unit": unit,
+                "measurement": measurement, "feature": "", "view": "",
+            })
+        if dims:
+            result["dimensions"] = dims
+
+        # Extract overall size from dimension values
+        size_vals = {}
+        for d in dims:
+            if d["measurement"]:
+                size_vals[d["measurement"]] = d["value"]
+        w = size_vals.get("width", size_vals.get("diameter", 1))
+        h = size_vals.get("height", size_vals.get("length", 1))
+        dep = size_vals.get("depth", size_vals.get("thickness", w))
+        result["overall_size"] = [w, h, dep]
+
+        if not result.get("object_type"):
+            result["description"] = text[:200]
+
+        return result if result else None

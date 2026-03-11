@@ -2,10 +2,22 @@
 
 Renders a triangle mesh as 2D line drawings with hidden-line removal,
 producing the standard front/side/top views used in mechanical drawings.
+
+Dimension annotations follow ASME Y14.5-2018:
+  - Unidirectional (all text reads left-to-right)
+  - Filled arrowheads with 3:1 length-to-width ratio
+  - Extension lines with visible gap from object outline
+  - Extension lines overshoot dimension lines
+  - Diameter symbol (⌀) prefix for diameters
+  - Radius symbol (R) prefix for radii
+  - Text centered in a break in the dimension line
+  - Third-angle projection layout
 """
 
+import math
+
 import numpy as np
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 
 
 # ---------------------------------------------------------------------------
@@ -237,10 +249,318 @@ def _raster_tri_zbuf(zbuf, pts_2d, pts_depth, size):
 
 
 # ---------------------------------------------------------------------------
+# Dimension annotation helpers
+# ---------------------------------------------------------------------------
+
+def _compute_mesh_dimensions(vertices, faces):
+    """Analyze the mesh bounding box and detect cylindrical shapes.
+
+    Returns a dict with:
+        width, height, depth: bounding box extents in mesh units (mm).
+        is_cylindrical: True if object appears cylindrical (circular cross-section
+                        when viewed from top).
+        diameter: if cylindrical, the diameter of the circular cross-section.
+    """
+    vertices = np.asarray(vertices, dtype=np.float64)
+    bb_min = vertices.min(axis=0)
+    bb_max = vertices.max(axis=0)
+    extents = bb_max - bb_min  # (X-width, Y-depth, Z-height)
+
+    dims = {
+        "width": float(extents[0]),
+        "depth": float(extents[1]),
+        "height": float(extents[2]),
+        "is_cylindrical": False,
+        "diameter": None,
+    }
+
+    # Detect cylindrical shape: check if XY cross-section is roughly circular.
+    # Compare bounding-box aspect in XY and check how close vertices lie
+    # to a circle in the XY plane.
+    xy_extent_x = extents[0]
+    xy_extent_y = extents[1]
+    if xy_extent_x > 1e-6 and xy_extent_y > 1e-6:
+        aspect = min(xy_extent_x, xy_extent_y) / max(xy_extent_x, xy_extent_y)
+        if aspect > 0.85:
+            # Check how closely vertices fit a circle in XY
+            cx = (bb_min[0] + bb_max[0]) / 2
+            cy = (bb_min[1] + bb_max[1]) / 2
+            radii = np.sqrt((vertices[:, 0] - cx) ** 2 + (vertices[:, 1] - cy) ** 2)
+            r_max = radii.max()
+            if r_max > 1e-6:
+                # Check that a majority of vertices sit close to the max
+                # radius (characteristic of cylinders / revolved shapes).
+                # Cubes and other prismatic shapes have vertices spread across
+                # a wider range of radii.
+                near_rim = np.sum(radii > 0.90 * r_max)
+                ratio = near_rim / len(radii)
+                if ratio > 0.5:
+                    dims["is_cylindrical"] = True
+                    dims["diameter"] = float(2.0 * r_max)
+
+    return dims
+
+
+def _get_view_dimensions(dims, view):
+    """Determine which dimension annotations to draw for a given view.
+
+    Per ASME Y14.5, dimensions placed outside the view with extension lines.
+
+    Returns a list of dicts, each with:
+        orientation: 'horizontal' or 'vertical'
+        value: the dimension value in mm
+        label: 'width', 'height', 'depth', 'diameter', or 'radius'
+    """
+    view_name = view if isinstance(view, str) else None
+    annotations = []
+
+    if view_name == "front":
+        if dims["is_cylindrical"]:
+            annotations.append({"orientation": "horizontal", "value": dims["diameter"],
+                                "label": "diameter"})
+        else:
+            annotations.append({"orientation": "horizontal", "value": dims["width"],
+                                "label": "width"})
+        annotations.append({"orientation": "vertical", "value": dims["height"],
+                            "label": "height"})
+    elif view_name in ("side", "right", "left"):
+        if dims["is_cylindrical"]:
+            annotations.append({"orientation": "horizontal", "value": dims["diameter"],
+                                "label": "diameter"})
+        else:
+            annotations.append({"orientation": "horizontal", "value": dims["depth"],
+                                "label": "depth"})
+        annotations.append({"orientation": "vertical", "value": dims["height"],
+                            "label": "height"})
+    elif view_name == "top":
+        annotations.append({"orientation": "horizontal", "value": dims["width"],
+                            "label": "width"})
+        if dims["is_cylindrical"]:
+            annotations.append({"orientation": "vertical", "value": dims["diameter"],
+                                "label": "diameter"})
+        else:
+            annotations.append({"orientation": "vertical", "value": dims["depth"],
+                                "label": "depth"})
+    else:
+        annotations.append({"orientation": "horizontal", "value": dims["width"],
+                            "label": "width"})
+        annotations.append({"orientation": "vertical", "value": dims["height"],
+                            "label": "height"})
+
+    return annotations
+
+
+# ---------------------------------------------------------------------------
+# ASME Y14.5-2018 compliant dimension annotation
+# ---------------------------------------------------------------------------
+
+# ASME Y14.5 arrowhead: filled, 3:1 length-to-width ratio
+_ARROW_LENGTH = 8
+_ARROW_HALF_WIDTH = _ARROW_LENGTH / 3.0
+
+# Extension line visible gap from object outline (ASME Y14.5 §1.7.4)
+_EXT_GAP = 3
+# Extension line overshoot past dimension line
+_EXT_OVERSHOOT = 5
+# Offset of first dimension line from object outline
+_DIM_OFFSET = 30
+# Thin line width for extension/dimension lines (ASME visible thin)
+_THIN_LINE = 1
+
+
+def _asme_format_value(value, label):
+    """Format a dimension value per ASME Y14.5.
+
+    - Diameter: ⌀XX.X  (using the Unicode diameter symbol U+2300)
+    - Radius: RXX.X
+    - Linear: XX.X
+    - Omit trailing zeros after one decimal (ASME convention: show to
+      the precision of measurement, minimum one decimal).
+    """
+    # Format to 1 decimal place; drop unnecessary trailing zero only
+    # if the value is an integer
+    if value == int(value) and value >= 1:
+        text = f"{value:.0f}"
+    else:
+        text = f"{value:.1f}"
+
+    if label == "diameter":
+        return f"\u2300{text}"
+    elif label == "radius":
+        return f"R{text}"
+    return text
+
+
+def _draw_arrowhead(draw, tip, direction, fill=0):
+    """Draw a filled arrowhead per ASME Y14.5 (3:1 aspect ratio).
+
+    Args:
+        tip: (x, y) pixel position of the arrow tip.
+        direction: unit (dx, dy) pointing toward the tip.
+    """
+    dx, dy = direction
+    px, py = -dy, dx  # perpendicular
+    bx = tip[0] - dx * _ARROW_LENGTH
+    by = tip[1] - dy * _ARROW_LENGTH
+    points = [
+        (tip[0], tip[1]),
+        (bx + px * _ARROW_HALF_WIDTH, by + py * _ARROW_HALF_WIDTH),
+        (bx - px * _ARROW_HALF_WIDTH, by - py * _ARROW_HALF_WIDTH),
+    ]
+    draw.polygon(points, fill=fill)
+
+
+def _load_font(size=11):
+    """Try to load a clean sans-serif font; fall back to default."""
+    for path in (
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/TTF/DejaVuSans.ttf",
+    ):
+        try:
+            return ImageFont.truetype(path, size)
+        except (IOError, OSError):
+            continue
+    return ImageFont.load_default()
+
+
+def _add_dimension_annotations(draw, edges_2d, dimensions, view,
+                                image_size, vertices, faces):
+    """Draw ASME Y14.5 dimension annotations.
+
+    Per ASME Y14.5-2018:
+    - Extension lines start with a visible gap from the object outline.
+    - Extension lines extend slightly past the dimension line.
+    - Filled arrowheads with 3:1 length:width ratio terminate dimension lines.
+    - Dimension text is unidirectional (reads left-to-right), centered in a
+      break in the dimension line.
+    - Diameter dimensions use the ⌀ symbol prefix.
+    - Radius dimensions use the R prefix.
+    """
+    if not dimensions or not edges_2d:
+        return
+
+    # Object bounding box in pixel coords
+    all_pts = []
+    for (x1, y1), (x2, y2) in edges_2d:
+        all_pts.append((x1 * image_size, y1 * image_size))
+        all_pts.append((x2 * image_size, y2 * image_size))
+    pts = np.array(all_pts)
+    obj_left = pts[:, 0].min()
+    obj_right = pts[:, 0].max()
+    obj_top = pts[:, 1].min()
+    obj_bottom = pts[:, 1].max()
+
+    ink = 0  # black
+    font = _load_font(11)
+
+    for ann in dimensions:
+        value = ann["value"]
+        if value is None or value < 1e-6:
+            continue
+        label = ann["label"]
+        text = _asme_format_value(value, label)
+        orientation = ann["orientation"]
+
+        # Measure text
+        bbox = draw.textbbox((0, 0), text, font=font)
+        tw = bbox[2] - bbox[0]
+        th = bbox[3] - bbox[1]
+
+        if orientation == "horizontal":
+            _draw_horizontal_dim(draw, font, text, tw, th,
+                                 obj_left, obj_right, obj_bottom,
+                                 image_size, ink)
+        elif orientation == "vertical":
+            _draw_vertical_dim(draw, font, text, tw, th,
+                               obj_top, obj_bottom, obj_right,
+                               image_size, ink)
+
+
+def _draw_horizontal_dim(draw, font, text, tw, th,
+                          x_left, x_right, obj_bottom, image_size, ink):
+    """Draw a horizontal dimension line below the object (ASME Y14.5)."""
+    dim_y = min(obj_bottom + _DIM_OFFSET, image_size - 14)
+    # Clamp extension line start so the gap is visible
+    ext_start_y = obj_bottom + _EXT_GAP
+
+    # Extension lines (vertical) — gap from object, overshoot past dim line
+    draw.line([(x_left, ext_start_y), (x_left, dim_y + _EXT_OVERSHOOT)],
+              fill=ink, width=_THIN_LINE)
+    draw.line([(x_right, ext_start_y), (x_right, dim_y + _EXT_OVERSHOOT)],
+              fill=ink, width=_THIN_LINE)
+
+    # Dimension line with text break in the centre
+    text_cx = (x_left + x_right) / 2
+    text_pad = 3  # padding around text in the break
+    break_left = text_cx - tw / 2 - text_pad
+    break_right = text_cx + tw / 2 + text_pad
+
+    # Draw dimension line in two segments around the text break
+    if break_left > x_left + _ARROW_LENGTH:
+        draw.line([(x_left, dim_y), (break_left, dim_y)],
+                  fill=ink, width=_THIN_LINE)
+    if break_right < x_right - _ARROW_LENGTH:
+        draw.line([(break_right, dim_y), (x_right, dim_y)],
+                  fill=ink, width=_THIN_LINE)
+
+    # Arrowheads (pointing inward)
+    _draw_arrowhead(draw, (x_left, dim_y), (1, 0), fill=ink)
+    _draw_arrowhead(draw, (x_right, dim_y), (-1, 0), fill=ink)
+
+    # Text — unidirectional, centred in the break (ASME Y14.5 §1.7.6)
+    tx = text_cx - tw / 2
+    ty = dim_y - th / 2 - 1
+    draw.rectangle([tx - 2, ty - 1, tx + tw + 2, ty + th + 1], fill=255)
+    draw.text((tx, ty), text, fill=ink, font=font)
+
+
+def _draw_vertical_dim(draw, font, text, tw, th,
+                        y_top, y_bottom, obj_right, image_size, ink):
+    """Draw a vertical dimension line to the right of the object (ASME Y14.5).
+
+    Per ASME Y14.5 unidirectional dimensioning, vertical dimension text
+    reads left-to-right (horizontal), centred in a break in the dim line.
+    """
+    dim_x = min(obj_right + _DIM_OFFSET, image_size - 14)
+    ext_start_x = obj_right + _EXT_GAP
+
+    # Extension lines (horizontal)
+    draw.line([(ext_start_x, y_top), (dim_x + _EXT_OVERSHOOT, y_top)],
+              fill=ink, width=_THIN_LINE)
+    draw.line([(ext_start_x, y_bottom), (dim_x + _EXT_OVERSHOOT, y_bottom)],
+              fill=ink, width=_THIN_LINE)
+
+    # Dimension line with text break
+    text_cy = (y_top + y_bottom) / 2
+    text_pad = 3
+    break_top = text_cy - th / 2 - text_pad
+    break_bottom = text_cy + th / 2 + text_pad
+
+    if break_top > y_top + _ARROW_LENGTH:
+        draw.line([(dim_x, y_top), (dim_x, break_top)],
+                  fill=ink, width=_THIN_LINE)
+    if break_bottom < y_bottom - _ARROW_LENGTH:
+        draw.line([(dim_x, break_bottom), (dim_x, y_bottom)],
+                  fill=ink, width=_THIN_LINE)
+
+    # Arrowheads (pointing inward)
+    _draw_arrowhead(draw, (dim_x, y_top), (0, 1), fill=ink)
+    _draw_arrowhead(draw, (dim_x, y_bottom), (0, -1), fill=ink)
+
+    # Text — unidirectional (reads L-to-R), centred in break
+    tx = dim_x - tw / 2
+    ty = text_cy - th / 2 - 1
+    draw.rectangle([tx - 2, ty - 1, tx + tw + 2, ty + th + 1], fill=255)
+    draw.text((tx, ty), text, fill=ink, font=font)
+
+
+# ---------------------------------------------------------------------------
 # Rendering
 # ---------------------------------------------------------------------------
 
-def render_orthographic(vertices, faces, view="front", image_size=512) -> np.ndarray:
+def render_orthographic(vertices, faces, view="front", image_size=512,
+                        annotate=False) -> np.ndarray:
     """Render mesh as a 2D orthographic view with hidden-line removal.
 
     Args:
@@ -248,6 +568,7 @@ def render_orthographic(vertices, faces, view="front", image_size=512) -> np.nda
         faces: (M, 3) triangle indices.
         view: "front", "side", "top", or (elevation_deg, azimuth_deg).
         image_size: output dimension in pixels.
+        annotate: if True, add dimension annotations (lines, arrows, text).
 
     Returns:
         (H, W) uint8 image — black lines on white background.
@@ -264,16 +585,29 @@ def render_orthographic(vertices, faces, view="front", image_size=512) -> np.nda
         py2 = int(y2 * image_size)
         draw.line([(px1, py1), (px2, py2)], fill=0, width=2)
 
+    if annotate:
+        dims = _compute_mesh_dimensions(vertices, faces)
+        annotations = _get_view_dimensions(dims, view)
+        _add_dimension_annotations(draw, edges, annotations, view,
+                                    image_size, vertices, faces)
+
     return np.array(img)
 
 
 def render_drawing_sheet(vertices, faces, views=("front", "side", "top"),
-                         image_size=512) -> np.ndarray:
+                         image_size=512, annotate=False) -> np.ndarray:
     """Multi-view engineering drawing on one sheet.
 
     Arranges views in standard third-angle projection layout:
     - Row 0: [front, side]
     - Row 1: [top, (empty or isometric)]
+
+    Args:
+        vertices: (N, 3) mesh vertices.
+        faces: (M, 3) triangle indices.
+        views: sequence of view names or (elev, azim) tuples.
+        image_size: cell size in pixels.
+        annotate: if True, add dimension annotations to each view.
 
     Returns: (H, W, 3) RGB uint8 image.
     """
@@ -299,7 +633,8 @@ def render_drawing_sheet(vertices, faces, views=("front", "side", "top"),
         x_off = col * cell
         y_off = row * cell
 
-        single = render_orthographic(vertices, faces, view, cell)
+        single = render_orthographic(vertices, faces, view, cell,
+                                         annotate=annotate)
         view_img = Image.fromarray(single).convert("RGB")
         sheet.paste(view_img, (x_off, y_off))
 

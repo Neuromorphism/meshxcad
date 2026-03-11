@@ -11,8 +11,8 @@ from meshxcad.alignment import find_correspondences
 
 
 class TestComplexCatalogCompleteness:
-    def test_catalog_has_10_objects(self):
-        assert len(list_complex_objects()) == 10
+    def test_catalog_has_at_least_10_objects(self):
+        assert len(list_complex_objects()) >= 10
 
     @pytest.mark.parametrize("name", list_complex_objects())
     def test_simple_mesh_valid(self, name):

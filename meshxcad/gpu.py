@@ -218,8 +218,8 @@ def _nn_torch(query, reference, k):
     import torch
 
     device = torch.device("cuda")
-    q = torch.tensor(query, dtype=torch.float32, device=device)
-    r = torch.tensor(reference, dtype=torch.float32, device=device)
+    q = torch.tensor(query, dtype=torch.float64, device=device)
+    r = torch.tensor(reference, dtype=torch.float64, device=device)
 
     n = len(q)
     m = len(r)
@@ -304,8 +304,15 @@ class AcceleratedKDTree:
     def query(self, x, k=1):
         """Query nearest neighbors."""
         x = np.asarray(x, dtype=np.float64)
+        squeeze = False
+        if x.ndim == 1:
+            x = x.reshape(1, -1)
+            squeeze = True
         if _GPU_AVAILABLE:
-            return nearest_neighbors(x, self._data, k=k)
+            dists, idx = nearest_neighbors(x, self._data, k=k)
+            if squeeze:
+                return dists[0], idx[0]
+            return dists, idx
         else:
             # Use scipy KDTree (lazy construction)
             if self._cpu_tree is None:

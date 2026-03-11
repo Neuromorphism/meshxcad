@@ -71,7 +71,7 @@ OP_TIER = {
     # Tier 3 — path-based (higher complexity, but sometimes necessary)
     "sweep": 3,
     # Tier 4 — modifiers (elegant when used sparingly)
-    "translate": 4, "scale": 4, "rotate": 4, "mirror": 4,
+    "translate": 4, "scale": 4, "rotate": 4, "mirror": 4, "fillet": 4,
     # Tier 5 — boolean/destructive (least elegant, avoid if possible)
     "subtract_cylinder": 5, "union": 5,
 }
@@ -1868,3 +1868,4 @@ def run_elegance_tournament(target_v, target_f, max_rounds=30, n_contestants=4):
         "cad_faces": champ_f,
         "population": [(s, p.summary()) for s, p, _ in final_scores],
     }
+
