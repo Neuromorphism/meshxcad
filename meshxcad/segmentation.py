@@ -1365,5 +1365,11 @@ def get_strategy_selector():
 try:
     from .optim import SegmentationStrategySelector as _SSS
     _STRATEGY_SELECTOR = _SSS()
+    # Load canonical weights if available (federated learning)
+    try:
+        from .federation import load_canonical
+        load_canonical(seg_selector=_STRATEGY_SELECTOR)
+    except Exception:
+        pass
 except Exception:
     _STRATEGY_SELECTOR = None

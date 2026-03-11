@@ -1,0 +1,82 @@
+name: Compact Learned Weights
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'learned_weights/shards/*.jsonl'
+  workflow_dispatch:
+    inputs:
+      epochs:
+        description: 'Number of replay epochs'
+        required: false
+        default: '3'
+      archive:
+        description: 'Archive shards after compaction'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+jobs:
+  compact:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install numpy
+          pip install -e . || pip install numpy  # fallback if setup.py needs extras
+
+      - name: Count shards before compaction
+        id: pre-check
+        run: |
+          SHARD_COUNT=$(find learned_weights/shards -name '*.jsonl' 2>/dev/null | wc -l)
+          echo "shard_count=$SHARD_COUNT" >> "$GITHUB_OUTPUT"
+          echo "Found $SHARD_COUNT experience shards"
+
+      - name: Run compaction
+        if: steps.pre-check.outputs.shard_count != '0'
+        run: |
+          EPOCHS="${{ github.event.inputs.epochs || '3' }}"
+          ARCHIVE="${{ github.event.inputs.archive || 'false' }}"
+          ARCHIVE_FLAG=""
+          if [ "$ARCHIVE" = "true" ]; then
+            ARCHIVE_FLAG="--archive"
+          fi
+          python -m meshxcad.federation compact \
+            --epochs "$EPOCHS" \
+            $ARCHIVE_FLAG
+          echo "--- Compaction complete ---"
+          python -m meshxcad.federation info
+
+      - name: Commit updated canonical weights
+        if: steps.pre-check.outputs.shard_count != '0'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add learned_weights/canonical.npz
+          # Also add archived shards if archive was requested
+          git add learned_weights/shards/ || true
+          if git diff --cached --quiet; then
+            echo "No weight changes to commit"
+          else
+            git commit -m "chore: compact learned weights from $(git log --oneline -1 --format='%h')
+
+            Auto-compacted experience shards into canonical weights.
+            Triggered by: ${{ github.event_name }}"
+            git push
+          fi
