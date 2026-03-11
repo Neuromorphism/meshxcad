@@ -10,6 +10,7 @@ test_data/cube/
 test_data/sphere/
 test_data/cylinder/
 .pytest_cache/
+learned_weights/shards/
 
 # Ignore STL/OBJ globally except in dev_models/
 *.stl
