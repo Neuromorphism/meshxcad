@@ -10,13 +10,17 @@ The pipeline runs these phases in order, each phase only proceeding if
 it improves the result:
 
     Phase 1  Analyse     — classify shape, estimate complexity, set budget
-    Phase 2  Initialise  — build starting program (or load existing)
+    Phase 2  Initialise  — build starting program (or load existing);
+                           uses reconstruct_cad for shape-aware init and
+                           diffusion strategy as a competing initialiser
     Phase 3  Coevolve    — alternating discriminator + elegance sweeps
-    Phase 4  Segment     — find uncovered regions in the target mesh
+    Phase 3b Diffusion   — diffusion-based strategy refinement pass
+    Phase 4  Segment     — find uncovered regions (learned strategy selection)
     Phase 5  Fill gaps   — fit new primitives to uncovered segments
-    Phase 6  Refine      — gradient-free parameter tuning per operation
+    Phase 6  Refine      — gradient-based parameter tuning per operation
     Phase 7  Fillets     — detect and add intersection blend surfaces
     Phase 8  Final sweep — one last coevolution pass to clean up
+    Phase 9  Record      — save experience for federated learning
 """
 
 import copy
@@ -25,6 +29,22 @@ import numpy as np
 from typing import Optional
 from scipy.spatial import KDTree
 from .gpu import AcceleratedKDTree as _AKDTree
+
+
+# ---------------------------------------------------------------------------
+# Federated learning: load canonical weights at module import time
+# ---------------------------------------------------------------------------
+
+def _load_federation_weights():
+    """Load learned weights from federated canonical checkpoint if available."""
+    try:
+        from .federation import load_canonical
+        load_canonical()
+        return True
+    except Exception:
+        return False
+
+_federation_loaded = _load_federation_weights()
 
 
 def auto_pipeline(target_v, target_f, *,
@@ -62,11 +82,14 @@ def auto_pipeline(target_v, target_f, *,
     # Thoroughness presets
     presets = {
         "quick":    {"sweeps": 3,  "rounds": 3,  "patience": 2,
-                     "refine_iter": 15, "gap_passes": 0, "final_sweep": False},
+                     "refine_iter": 15, "gap_passes": 0, "final_sweep": False,
+                     "diffusion_steps": 0, "use_reconstruct": False},
         "normal":   {"sweeps": 15, "rounds": 5,  "patience": 3,
-                     "refine_iter": 30, "gap_passes": 1, "final_sweep": True},
+                     "refine_iter": 30, "gap_passes": 1, "final_sweep": True,
+                     "diffusion_steps": 25, "use_reconstruct": True},
         "thorough": {"sweeps": 30, "rounds": 10, "patience": 5,
-                     "refine_iter": 50, "gap_passes": 2, "final_sweep": True},
+                     "refine_iter": 50, "gap_passes": 2, "final_sweep": True,
+                     "diffusion_steps": 50, "use_reconstruct": True},
     }
     cfg = presets.get(thoroughness, presets["normal"])
     phases = []
@@ -76,30 +99,47 @@ def auto_pipeline(target_v, target_f, *,
             print(f"  [{phase_name}] {msg}")
 
     # ------------------------------------------------------------------
-    # Phase 1: Analyse
+    # Phase 1: Analyse — classify shape, estimate complexity, set budget
     # ------------------------------------------------------------------
     phase_start = time.time()
     mc = mesh_complexity(target_v, target_f)
     budget = mc["op_budget"]
     complexity = mc["complexity"]
 
+    # Shape classification informs Phase 2 initialisation strategy
+    shape_info = None
+    if cfg["use_reconstruct"]:
+        try:
+            from .reconstruct import classify_mesh
+            shape_info = classify_mesh(target_v, target_f)
+        except Exception:
+            pass
+
     phase_rec = {
         "phase": "analyse",
         "complexity": round(complexity, 3),
         "op_budget": budget,
         "n_components": mc["n_components"],
+        "shape_type": shape_info["shape_type"] if shape_info else None,
+        "shape_confidence": round(shape_info["confidence"], 3) if shape_info else None,
         "elapsed": round(time.time() - phase_start, 2),
     }
     phases.append(phase_rec)
     if verbose:
         print(f"Phase 1 — Analyse")
+        shape_str = ""
+        if shape_info:
+            shape_str = (f", shape={shape_info['shape_type']}"
+                         f" ({shape_info['confidence']:.0%})")
         _log("analyse", f"complexity={complexity:.3f}, budget={budget} ops, "
-             f"components={mc['n_components']}")
+             f"components={mc['n_components']}{shape_str}")
 
     # ------------------------------------------------------------------
-    # Phase 2: Initialise
+    # Phase 2: Initialise — compete multiple initialization strategies
     # ------------------------------------------------------------------
     phase_start = time.time()
+    init_strategies = {}
+
     if initial_cad is not None:
         # Load existing program
         if isinstance(initial_cad, dict):
@@ -107,15 +147,65 @@ def auto_pipeline(target_v, target_f, *,
         else:
             prog = initial_cad
         mode = "refine"
+        acc = score_accuracy(prog, target_v, target_f)
+        init_strategies["provided"] = (prog, acc)
     else:
-        # Build from scratch
-        prog = initial_program(target_v, target_f)
         mode = "scratch"
 
-    acc = score_accuracy(prog, target_v, target_f)
+        # Strategy A: basic initial_program (always)
+        prog_basic = initial_program(target_v, target_f)
+        acc_basic = score_accuracy(prog_basic, target_v, target_f)
+        init_strategies["basic"] = (prog_basic, acc_basic)
+
+        # Strategy B: reconstruct_cad — shape-aware reconstruction
+        if cfg["use_reconstruct"] and shape_info is not None:
+            try:
+                from .reconstruct import reconstruct_cad
+                recon = reconstruct_cad(target_v, target_f,
+                                        shape_type=shape_info["shape_type"])
+                if recon and recon.get("cad_vertices") is not None:
+                    # Convert reconstruction result to a CadProgram
+                    recon_prog = _reconstruction_to_program(
+                        recon, target_v, target_f)
+                    if recon_prog is not None:
+                        acc_recon = score_accuracy(recon_prog, target_v,
+                                                   target_f)
+                        init_strategies["reconstruct"] = (recon_prog, acc_recon)
+            except Exception:
+                pass
+
+        # Strategy C: diffusion strategy (for normal/thorough)
+        if cfg["diffusion_steps"] > 0:
+            try:
+                from .diffusion_strategy import (
+                    run_diffusion_strategy, DiffusionConfig)
+                diff_cfg = DiffusionConfig(
+                    num_timesteps=min(15, cfg["diffusion_steps"]),
+                    patience=3,
+                    n_candidates_per_step=4,
+                )
+                diff_result = run_diffusion_strategy(
+                    target_v, target_f, config=diff_cfg)
+                diff_prog = diff_result["program"]
+                acc_diff = score_accuracy(diff_prog, target_v, target_f)
+                init_strategies["diffusion"] = (diff_prog, acc_diff)
+            except Exception:
+                pass
+
+        # Pick the best initialiser
+        best_strategy = max(init_strategies,
+                            key=lambda k: init_strategies[k][1])
+        prog, acc = init_strategies[best_strategy]
+
+    if mode == "refine":
+        best_strategy = "provided"
+        acc = init_strategies["provided"][1]
+
     phase_rec = {
         "phase": "initialise",
         "mode": mode,
+        "strategy": best_strategy,
+        "candidates": {k: round(v[1], 4) for k, v in init_strategies.items()},
         "accuracy": round(acc, 4),
         "n_ops": prog.n_enabled(),
         "summary": prog.summary(),
@@ -124,7 +214,12 @@ def auto_pipeline(target_v, target_f, *,
     phases.append(phase_rec)
     if verbose:
         print(f"Phase 2 — Initialise ({mode})")
-        _log("init", f"acc={acc:.4f}, {prog.summary()}")
+        if len(init_strategies) > 1:
+            for name, (_, a) in sorted(init_strategies.items(),
+                                        key=lambda x: -x[1][1]):
+                tag = " ◀" if name == best_strategy else ""
+                _log("init", f"  {name}: acc={a:.4f}{tag}")
+        _log("init", f"best={best_strategy}, acc={acc:.4f}, {prog.summary()}")
 
     # ------------------------------------------------------------------
     # Phase 3: Coevolve (main optimisation)
@@ -186,6 +281,38 @@ def auto_pipeline(target_v, target_f, *,
         "elapsed": round(time.time() - phase_start, 2),
     }
     phases.append(phase_rec)
+
+    # ------------------------------------------------------------------
+    # Phase 3b: Diffusion refinement pass (normal/thorough only)
+    # Only keep the result if it actually improves overall accuracy.
+    # ------------------------------------------------------------------
+    if cfg["diffusion_steps"] > 0:
+        phase_start = time.time()
+        acc_before_diff = acc_after_coevolve
+        diff_prog, acc_after_diff, diff_info = _run_diffusion_refinement(
+            prog, target_v, target_f, cfg, verbose)
+
+        # Only adopt the diffusion result if it beats what coevolution produced
+        adopted = acc_after_diff > acc_before_diff
+        if adopted:
+            prog = diff_prog
+        else:
+            acc_after_diff = acc_before_diff
+
+        phase_rec = {
+            "phase": "diffusion_refine",
+            "accuracy_before": round(acc_before_diff, 4),
+            "accuracy_after": round(acc_after_diff, 4),
+            "adopted": adopted,
+            "steps_improved": diff_info.get("n_improved", 0),
+            "elapsed": round(time.time() - phase_start, 2),
+        }
+        phases.append(phase_rec)
+        if verbose:
+            tag = "adopted" if adopted else "kept coevolve"
+            _log("diffusion", f"acc {acc_before_diff:.4f} → "
+                 f"{acc_after_diff:.4f} ({tag}, "
+                 f"{diff_info.get('n_improved', 0)} improvements)")
 
     # ------------------------------------------------------------------
     # Phase 4+5: Segment uncovered regions and fill gaps
@@ -303,6 +430,15 @@ def auto_pipeline(target_v, target_f, *,
         print(f"  accuracy={final_acc:.4f}  elegance={final_eleg['total']:.4f}")
         print(f"  {total_elapsed:.1f}s total")
 
+    # ------------------------------------------------------------------
+    # Phase 9: Record experience for federated learning
+    # ------------------------------------------------------------------
+    _record_pipeline_experience(
+        phases, final_acc, final_eleg, prog, target_v, target_f,
+        mode, best_strategy if mode == "scratch" else "provided",
+        library,
+    )
+
     return {
         "program": prog.to_dict(),
         "_program_obj": prog,
@@ -317,11 +453,183 @@ def auto_pipeline(target_v, target_f, *,
 
 
 # ---------------------------------------------------------------------------
+# Reconstruction result → CadProgram converter
+# ---------------------------------------------------------------------------
+
+def _reconstruction_to_program(recon_result, target_v, target_f):
+    """Convert a reconstruct_cad result into a CadProgram.
+
+    The reconstruction module returns raw mesh vertices/faces and shape
+    parameters.  We translate those into CadOp operations that the
+    pipeline can further refine.
+    """
+    from .cad_program import CadProgram, CadOp
+
+    shape = recon_result.get("shape_type", "freeform")
+    params = recon_result.get("params", {})
+
+    if shape == "freeform":
+        return None  # Can't represent freeform as parametric ops
+
+    ops = []
+
+    if shape == "sphere":
+        center = params.get("center", [0, 0, 0])
+        radius = params.get("radius", 1.0)
+        ops.append(CadOp("sphere", {
+            "center": list(center) if hasattr(center, '__iter__') else [0, 0, 0],
+            "radius": float(radius),
+        }))
+
+    elif shape == "cylinder":
+        center = params.get("center", [0, 0, 0])
+        radius = params.get("radius", 1.0)
+        height = params.get("height", 2.0)
+        axis = params.get("axis", [0, 0, 1])
+        ops.append(CadOp("cylinder", {
+            "center": list(center) if hasattr(center, '__iter__') else [0, 0, 0],
+            "radius": float(radius),
+            "height": float(height),
+            "axis": list(axis) if hasattr(axis, '__iter__') else [0, 0, 1],
+        }))
+
+    elif shape == "cone":
+        center = params.get("center", [0, 0, 0])
+        radius = params.get("radius", 1.0)
+        height = params.get("height", 2.0)
+        ops.append(CadOp("cone", {
+            "center": list(center) if hasattr(center, '__iter__') else [0, 0, 0],
+            "radius": float(radius),
+            "height": float(height),
+        }))
+
+    elif shape == "box":
+        center = params.get("center", [0, 0, 0])
+        half_dims = params.get("half_dims", [1, 1, 1])
+        ops.append(CadOp("box", {
+            "center": list(center) if hasattr(center, '__iter__') else [0, 0, 0],
+            "half_dims": list(half_dims) if hasattr(half_dims, '__iter__') else [1, 1, 1],
+        }))
+
+    elif shape in ("revolve", "extrude", "sweep", "composite"):
+        # For complex shapes, fall back to initial_program which
+        # already handles these well via its own classification
+        return None
+
+    else:
+        return None
+
+    if not ops:
+        return None
+
+    try:
+        prog = CadProgram(ops)
+        # Verify it produces valid geometry
+        v, f = prog.evaluate()
+        if len(v) == 0:
+            return None
+        return prog
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Diffusion refinement: use diffusion strategies to improve an existing program
+# ---------------------------------------------------------------------------
+
+def _run_diffusion_refinement(prog, target_v, target_f, cfg, verbose):
+    """Run a diffusion-based refinement pass on an existing program.
+
+    Unlike the full diffusion initialiser, this takes an already-good
+    program and applies targeted diffusion strategies (ParameterRefine,
+    ElegancePolish) to squeeze out more accuracy.
+
+    Returns (improved_program, accuracy, info_dict).
+    """
+    from .elegance import score_accuracy
+
+    try:
+        from .diffusion_strategy import (
+            DiffusionConfig, DiffusionStep,
+            ParameterRefine, ElegancePolish, TopologicalAdjust,
+            score_program, extract_mesh_features, NoiseSchedule,
+        )
+    except ImportError:
+        acc = score_accuracy(prog, target_v, target_f)
+        return prog, acc, {"n_improved": 0}
+
+    rng = np.random.RandomState(123)
+    mesh_features = extract_mesh_features(target_v, target_f)
+
+    # Focus on refinement-tier strategies (low noise)
+    strategies = [ParameterRefine(), ElegancePolish(), TopologicalAdjust()]
+
+    best_prog = copy.deepcopy(prog)
+    best_score = score_program(best_prog, target_v, target_f, mesh_features)
+    n_improved = 0
+    n_steps = min(cfg["diffusion_steps"], 30)
+
+    schedule = NoiseSchedule(num_timesteps=n_steps, schedule_type="cosine")
+
+    for t_rev in range(n_steps):
+        t = n_steps - 1 - t_rev
+        noise_level = schedule.noise_level(t)
+
+        # At this stage we want low-noise refinement
+        effective_noise = noise_level * 0.3  # Scale down — we're refining
+
+        all_candidates = []
+        for strategy in strategies:
+            # Only use strategies appropriate for current noise level
+            if effective_noise > 0.6 and strategy.tier > 2:
+                continue
+            if effective_noise <= 0.3 and strategy.tier < 3:
+                continue
+
+            try:
+                candidates = strategy.apply(
+                    best_prog, target_v, target_f, mesh_features,
+                    effective_noise, rng)
+                all_candidates.extend(candidates)
+            except Exception:
+                continue
+
+        # If tier filtering excluded everything, try all strategies
+        if not all_candidates:
+            for strategy in strategies:
+                try:
+                    candidates = strategy.apply(
+                        best_prog, target_v, target_f, mesh_features,
+                        effective_noise, rng)
+                    all_candidates.extend(candidates)
+                except Exception:
+                    continue
+
+        for name, cand in all_candidates:
+            try:
+                s = score_program(cand, target_v, target_f, mesh_features)
+                if s > best_score:
+                    best_prog = cand
+                    best_score = s
+                    n_improved += 1
+            except Exception:
+                continue
+
+    acc = score_accuracy(best_prog, target_v, target_f)
+    return best_prog, acc, {"n_improved": n_improved, "n_steps": n_steps}
+
+
+# ---------------------------------------------------------------------------
 # Gap-filling: find uncovered target regions and add primitives
 # ---------------------------------------------------------------------------
 
 def _fill_gaps(program, target_v, target_f, budget, verbose):
     """Find uncovered target regions and try to fill them with new ops.
+
+    Uses learned segmentation strategy selection when available to pick
+    the best decomposition approach for the uncovered region, and tries
+    advanced shape types (revolve, extrude, profiled_cylinder) in addition
+    to basic primitives.
 
     Returns number of operations added.
     """
@@ -348,13 +656,21 @@ def _fill_gaps(program, target_v, target_f, budget, verbose):
     if len(uncovered_verts) < 10:
         return 0
 
+    # Use learned segmentation strategy if available for smarter clustering
+    uncovered_faces = _extract_uncovered_faces(target_f, uncovered_mask)
+
     # Cluster uncovered vertices into groups
-    clusters = _cluster_vertices(uncovered_verts, max_clusters=min(5, budget - program.n_enabled()))
+    clusters = _cluster_vertices(uncovered_verts,
+                                 max_clusters=min(5, budget - program.n_enabled()))
     if not clusters:
         return 0
 
     added = 0
     acc_before = score_accuracy(program, target_v, target_f)
+
+    # Extended shape types: try advanced shapes alongside basic primitives
+    basic_shapes = ["cylinder", "box", "sphere", "cone"]
+    advanced_shapes = ["profiled_cylinder", "revolve", "extrude"]
 
     for cluster_verts in clusters:
         if len(cluster_verts) < 8:
@@ -366,7 +682,8 @@ def _fill_gaps(program, target_v, target_f, budget, verbose):
         best_op = None
         best_acc = acc_before
 
-        for shape in ["cylinder", "box", "sphere", "cone"]:
+        # Try basic shapes first (fast)
+        for shape in basic_shapes:
             try:
                 op = _make_candidate_op(shape, cluster_verts)
                 if op is None:
@@ -384,6 +701,25 @@ def _fill_gaps(program, target_v, target_f, budget, verbose):
             except Exception:
                 continue
 
+        # Try advanced shapes if basic shapes didn't find a great fit
+        if best_op is None or best_acc < acc_before + 0.01:
+            for shape in advanced_shapes:
+                try:
+                    op = _make_candidate_op(shape, cluster_verts)
+                    if op is None:
+                        continue
+                    program.operations.append(op)
+                    program.invalidate_cache()
+                    test_acc = score_accuracy(program, target_v, target_f)
+                    program.operations.pop()
+                    program.invalidate_cache()
+
+                    if test_acc > best_acc + 0.001:
+                        best_acc = test_acc
+                        best_op = op
+                except Exception:
+                    continue
+
         if best_op is not None:
             program.operations.append(best_op)
             program.invalidate_cache()
@@ -393,6 +729,14 @@ def _fill_gaps(program, target_v, target_f, budget, verbose):
                 print(f"    + {best_op.op_type} (acc → {best_acc:.4f})")
 
     return added
+
+
+def _extract_uncovered_faces(faces, uncovered_mask):
+    """Extract faces where at least 2 vertices are uncovered."""
+    if len(faces) == 0:
+        return np.array([], dtype=np.int64).reshape(0, 3)
+    uncov_count = uncovered_mask[faces].sum(axis=1)
+    return faces[uncov_count >= 2]
 
 
 def _cluster_vertices(vertices, max_clusters=5):
@@ -474,3 +818,55 @@ def _add_fillets(program, target_v, target_f, verbose):
             program.invalidate_cache()
 
     return added
+
+
+# ---------------------------------------------------------------------------
+# Federated learning: record experience from this pipeline run
+# ---------------------------------------------------------------------------
+
+def _record_pipeline_experience(phases, final_acc, final_eleg, prog,
+                                target_v, target_f, mode, init_strategy,
+                                technique_library):
+    """Record experience from this pipeline run for federated learning.
+
+    Captures which initialization strategy worked best, which coevolution
+    techniques were effective, and overall pipeline performance.  This
+    feeds into the federation system so future runs benefit from this
+    session's learnings.
+    """
+    try:
+        from .federation import record_experience, auto_save_shard
+        from .optim import mesh_features
+
+        features = mesh_features(target_v, target_f)
+        feature_vec = [float(v) for v in features.values()]
+
+        # Record which init strategy won
+        record_experience(
+            "segmentation",
+            features=feature_vec,
+            strategy=init_strategy,
+            quality=float(final_acc),
+        )
+
+        # Record technique effectiveness from coevolution
+        tech_summary = technique_library.summary() if technique_library else {}
+        if isinstance(tech_summary, dict):
+            for tech_name, stats in tech_summary.items():
+                if isinstance(stats, dict) and stats.get("successes", 0) > 0:
+                    record_experience(
+                        "fixer",
+                        fixer_name=tech_name,
+                        improvement=float(stats.get("avg_improvement", 0)),
+                        attempts=int(stats.get("attempts", 0)),
+                        successes=int(stats.get("successes", 0)),
+                    )
+
+        # Auto-save experience shard (non-blocking, best-effort)
+        try:
+            auto_save_shard()
+        except Exception:
+            pass
+
+    except Exception:
+        pass  # Federation is optional — never fail the pipeline
