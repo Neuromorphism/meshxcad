@@ -24,3 +24,12 @@ test_data/cylinder/
 dev_models/downloads/
 dev_models/*.py
 dev_models/*.zip
+
+# Large STL files (>10MB) - too big for git, download separately
+dev_models/cephalopods/camila_octopus.stl
+dev_models/chess_kings/chessbuds_king.stl
+dev_models/chess_kings/results/chessbuds/
+dev_models/chess_queens/chessbuds_queen.stl
+dev_models/chess_queens/openscad_cdr_queen.stl
+dev_models/chess_queens/openscad_jib_queen.stl
+dev_models/chess_queens/results/chessbuds/
