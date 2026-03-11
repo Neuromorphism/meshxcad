@@ -670,14 +670,32 @@ def _composite_score(diffs):
 
 
 def _select_fixer_strategy(diffs, tried, fixer_scores):
-    """Select the best fixer to apply based on historic success rates.
+    """Select the best fixer to apply based on learned priority weights.
+
+    Uses a differentiable FixerPrioritySelector when available, which
+    learns optimal mixing weights for (diff_score, freshness, history)
+    via autograd.  Falls back to the original heuristic formula.
 
     Prioritizes:
     1. Untried differentiators with high current scores
     2. Fixers with high historical improvement rates
     3. Falls back to the highest-scoring differentiator
     """
-    # Build candidates: (priority_score, diff_name)
+    # Try learned selector first
+    if _FIXER_SELECTOR is not None:
+        diff_scores = {name: score for score, name, _ in diffs
+                       if name in FIXERS}
+        if diff_scores:
+            ranked = _FIXER_SELECTOR.score(diff_scores, tried, fixer_scores)
+            if ranked:
+                chosen_name = ranked[0][1]
+                # Find the diff score for the chosen fixer
+                for score, name, _ in diffs:
+                    if name == chosen_name:
+                        return score, name
+                return ranked[0][0], chosen_name
+
+    # Fallback: original heuristic
     candidates = []
     for score, name, _ in diffs:
         if name not in FIXERS:
@@ -692,6 +710,19 @@ def _select_fixer_strategy(diffs, tried, fixer_scores):
 
     candidates.sort(key=lambda c: c[0], reverse=True)
     return candidates[0][1], candidates[0][2]
+
+
+def get_fixer_selector():
+    """Return the global FixerPrioritySelector instance (or None)."""
+    return _FIXER_SELECTOR
+
+
+# Module-level singleton
+try:
+    from meshxcad.optim import FixerPrioritySelector as _FPS
+    _FIXER_SELECTOR = _FPS(list(FIXERS.keys()))
+except Exception:
+    _FIXER_SELECTOR = None
 
 
 def run_adversarial_loop(output_dir="/tmp/adversarial_loop",
@@ -880,6 +911,13 @@ def run_adversarial_loop(output_dir="/tmp/adversarial_loop",
             if improved:
                 fixer_stats[fname]["successes"] += 1
                 fixer_stats[fname]["total_improvement"] += improvement_pct
+
+        # Update learned fixer selector (gradient step)
+        if _FIXER_SELECTOR is not None and fixers_applied:
+            diff_scores = {name: score for score, name, _ in diffs}
+            _FIXER_SELECTOR.update(
+                fixers_applied[0], diff_scores, tried, fixer_avg,
+                improved, abs(improvement_pct))
 
         # ---- Record ----
         elapsed = time.time() - start_time

@@ -1318,7 +1318,21 @@ def segment_mesh(vertices, faces, strategy="auto", template=None,
 
 
 def _auto_select_strategy(vertices, faces):
-    """Pick the best segmentation strategy from mesh properties."""
+    """Pick the best segmentation strategy from mesh properties.
+
+    Uses a learned scoring function (SegmentationStrategySelector) when
+    available, falling back to the original heuristic rules.  The learned
+    selector maps mesh features (elongation, circularity, face count, etc.)
+    through a differentiable softmax to produce strategy probabilities,
+    enabling gradient-based tuning via ``selector.update()``.
+    """
+    try:
+        from .optim import SegmentationStrategySelector
+        return _STRATEGY_SELECTOR.select(vertices, faces)
+    except Exception:
+        pass
+
+    # Fallback: original heuristic rules
     v = np.asarray(vertices)
     center = v.mean(axis=0)
     centered = v - center
@@ -1340,3 +1354,16 @@ def _auto_select_strategy(vertices, faces):
         return "normal_cluster"  # Large meshes → fast normal clustering
     else:
         return "convexity"  # General → convexity decomposition
+
+
+def get_strategy_selector():
+    """Return the global SegmentationStrategySelector instance."""
+    return _STRATEGY_SELECTOR
+
+
+# Module-level singleton — initialized lazily on first import
+try:
+    from .optim import SegmentationStrategySelector as _SSS
+    _STRATEGY_SELECTOR = _SSS()
+except Exception:
+    _STRATEGY_SELECTOR = None

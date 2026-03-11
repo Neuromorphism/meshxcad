@@ -917,6 +917,38 @@ def refine_operation(program, op_index, target_v, target_f, max_iter=30):
             break
 
 
+def refine_operation_diff(program, op_index, target_v, target_f, max_iter=50):
+    """Refine an operation's parameters using gradient-based optimization.
+
+    Uses automatic differentiation (via PyTorch) or finite-difference
+    gradients to minimize the total cost w.r.t. continuous parameters.
+    This is generally more efficient than coordinate descent for operations
+    with many coupled parameters (e.g., sweep paths, revolve profiles).
+
+    Falls back to the standard coordinate-descent refine_operation() if
+    the optim module is unavailable.
+
+    Args:
+        program: CadProgram instance
+        op_index: index of the operation to refine
+        target_v: (N, 3) target mesh vertices
+        target_f: (M, 3) target mesh faces
+        max_iter: maximum gradient descent iterations
+
+    Returns:
+        float: final total cost
+    """
+    try:
+        from .optim import DifferentiableRefiner
+        refiner = DifferentiableRefiner(max_iter=max_iter)
+        return refiner.refine(program, op_index, target_v, target_f)
+    except Exception:
+        # Fallback to coordinate descent
+        refine_operation(program, op_index, target_v, target_f,
+                         max_iter=max_iter)
+        return program.total_cost(target_v, target_f)
+
+
 def remove_operation(program, op_index):
     """Disable an operation and check if total cost improves."""
     if op_index < 0 or op_index >= len(program.operations):
