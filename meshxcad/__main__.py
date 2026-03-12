@@ -1033,6 +1033,50 @@ def _run_detect_fillets(args):
         print(f"Saved to: {out_path}")
 
 
+def _run_defeature(args):
+    """Remove small features from a STEP file."""
+    import time
+    from .step_io import defeature_step
+
+    t0 = time.time()
+    result = defeature_step(args.step, args.output,
+                            area_fraction=args.fraction)
+    elapsed = time.time() - t0
+    method = result.get("method", "brep")
+    print(f"Method:     {method}")
+    print(f"Original:   {result['n_original']} B-Rep faces")
+    print(f"Removed:    {result['n_removed']} faces")
+    print(f"Remaining:  {result['n_remaining']} faces")
+    print(f"Def. mesh:  {len(result['defeatured_vertices'])} verts, "
+          f"{len(result['defeatured_faces'])} faces")
+    print(f"Elapsed:    {elapsed:.1f}s")
+    print(f"Saved to:   {args.output}")
+
+
+def _run_refeature(args):
+    """Re-create detailed model from mesh + defeatured STEP."""
+    import time
+    from .step_io import refeature
+    from .stl_io import write_binary_stl
+
+    t0 = time.time()
+    mesh_v, mesh_f = load_mesh(args.mesh)
+    result = refeature(mesh_v, mesh_f, args.defeatured)
+    elapsed = time.time() - t0
+
+    print(f"Accuracy:   {result['accuracy']:.4f}")
+    print(f"Features:   {result['n_feature_regions']} regions, "
+          f"{result['n_feature_vertices']} vertices")
+    print(f"Coverage:   {result['feature_coverage']:.3f}")
+    print(f"Elapsed:    {elapsed:.1f}s")
+
+    if args.output:
+        write_binary_stl(args.output,
+                         result["refeature_vertices"],
+                         result["refeature_faces"])
+        print(f"Saved to:   {args.output}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="meshxcad",
@@ -1273,11 +1317,27 @@ examples — adding detail to an existing STEP file:
     draw_parser.add_argument("-q", "--quiet", action="store_true",
                               help="Suppress progress output")
 
+    defeature_p = subparsers.add_parser("defeature",
+                                         help="Remove small features from STEP")
+    defeature_p.add_argument("step", help="Input STEP/STP file")
+    defeature_p.add_argument("-o", "--output", required=True,
+                              help="Output defeatured STEP file")
+    defeature_p.add_argument("--fraction", type=float, default=0.1,
+                              help="Area fraction threshold (default: 0.1)")
+
+    refeature_p = subparsers.add_parser("refeature",
+                                         help="Re-create detailed model from mesh + defeatured STEP")
+    refeature_p.add_argument("mesh", help="Detailed mesh file (STL/STEP)")
+    refeature_p.add_argument("defeatured", help="Defeatured STEP file")
+    refeature_p.add_argument("-o", "--output", default=None,
+                              help="Output STL file")
+
     # Check if the first arg is a known subcommand — if so, don't add
     # the top-level positional 'mesh' arg (it conflicts with subparsers).
     _known_subcommands = {
         "auto", "drawing", "classify", "complexity", "segment", "fit",
         "profile", "reconstruct", "score", "refine", "detect-fillets", "gpu",
+        "defeature", "refeature",
     }
     _is_subcommand = (len(sys.argv) > 1 and sys.argv[1] in _known_subcommands)
 
@@ -1337,6 +1397,8 @@ examples — adding detail to an existing STEP file:
         "refine":         _run_refine,
         "detect-fillets": _run_detect_fillets,
         "gpu":            _run_gpu_info,
+        "defeature":      _run_defeature,
+        "refeature":      _run_refeature,
     }
 
     if args.command in _subcommand_dispatch:
