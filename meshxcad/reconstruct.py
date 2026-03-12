@@ -597,16 +597,21 @@ def classify_mesh(vertices, faces):
     if confidence < 0.15:
         best_type = "freeform"
 
-    # Quality-based override: if winner is cone/cylinder/sphere, try revolve
-    # reconstruction too.  Ornate shapes (chess pieces, vases, etc.) often
-    # mislead the residual-based classifier because a linear taper fits "well"
-    # locally even though a cone reconstruction discards all profile detail.
-    # Always prefer revolve for shapes with decent circularity.
-    # For shapes with low circularity, still try revolve as it usually beats
-    # a simple primitive for complex organic geometry.
+    # Quality-based override: if winner is a simple primitive, check if revolve
+    # reconstruction would be more appropriate.  Ornate shapes (chess pieces,
+    # vases, etc.) often mislead the residual-based classifier because a
+    # linear taper fits "well" locally even though a cone/cylinder discards
+    # all profile detail.
+    # Only override to revolve if the shape has decent circularity — otherwise
+    # keep the primitive classification for genuinely simple shapes.
     if best_type in ("cone", "cylinder", "sphere"):
-        best_type = "revolve"
-        best_details = revolve_info
+        circularity = revolve_info.get("circularity", 0.0)
+        # For shapes with high circularity, revolve captures profile detail
+        # that simple primitives miss.  For low circularity, keep the
+        # primitive (it may be a genuine cylinder/sphere in an assembly).
+        if circularity > 0.5 or revolve_score < best_score * 1.2:
+            best_type = "revolve"
+            best_details = revolve_info
 
     return {
         "shape_type": best_type,
@@ -1943,7 +1948,7 @@ def decompose_mesh(vertices, faces):
 
 
 def _classify_component(vertices, faces, bbox_diag_total):
-    """Classify a single mesh component as body, tentacle, or detail.
+    """Classify a single mesh component by geometric character.
 
     Args:
         vertices: (N, 3) component vertices
@@ -1951,7 +1956,8 @@ def _classify_component(vertices, faces, bbox_diag_total):
         bbox_diag_total: bounding box diagonal of the full mesh
 
     Returns:
-        dict with: component_type ("body", "tentacle", "wing", "detail"),
+        dict with: component_type ("body", "tentacle", "wing", "detail",
+                   "housing", "shaft", "flange", "panel"),
                    shape_type, and fit info
     """
     v = np.asarray(vertices, dtype=np.float64)
@@ -1976,7 +1982,7 @@ def _classify_component(vertices, faces, bbox_diag_total):
     else:
         elongation = 10.0
 
-    # Flatness ratio (for wings)
+    # Flatness ratio (for wings/panels)
     if eigvals[2] > 1e-12:
         flatness = float(np.sqrt(eigvals[1] / eigvals[2]))
     else:
@@ -1986,29 +1992,122 @@ def _classify_component(vertices, faces, bbox_diag_total):
     sorted_dims = sorted(bbox, reverse=True)
     aspect = sorted_dims[0] / max(sorted_dims[1], 1e-12)
 
-    # Classification logic
-    # Wings: extremely flat components (flatness > 12 means nearly 2D)
-    if flatness > 12.0 and elongation < 4.0:
-        return {"component_type": "wing", "shape_type": "freeform",
-                "elongation": elongation, "flatness": flatness}
+    # Relative size to total mesh
+    rel_size = bbox_diag / max(bbox_diag_total, 1e-12)
 
-    # Tentacles: very highly elongated components (elongation > 4.0)
-    # Threshold is set high to avoid classifying tall symmetric shapes
-    # (like chess pieces, vases, columns) as tentacles
-    if elongation > 4.0 or aspect > 5.0:
-        return {"component_type": "tentacle", "shape_type": "sweep",
-                "elongation": elongation}
+    # Check circularity (revolve-like character)
+    revolve_info = detect_revolve_axis(v)
+    circularity = revolve_info.get("circularity", 0.0)
 
     # Check sphericity
     sphere = fit_sphere(v)
     sphere_score = sphere["residual"] / max(bbox_diag, 1e-12)
 
+    # Check cylindricity
+    cyl = fit_cylinder(v)
+    cyl_score = cyl["residual"] / max(bbox_diag, 1e-12)
+
+    # Wings/panels: extremely flat components
+    if flatness > 8.0 and elongation < 4.0:
+        # Distinguish wing (organic) from panel (mechanical) by circularity
+        if circularity > 0.5:
+            return {"component_type": "housing", "shape_type": "revolve",
+                    "elongation": elongation, "flatness": flatness,
+                    "circularity": circularity}
+        return {"component_type": "panel", "shape_type": "extrude",
+                "elongation": elongation, "flatness": flatness}
+
+    # Tentacles/shafts: very highly elongated components
+    if elongation > 4.0 or aspect > 5.0:
+        # Shafts have high circularity; tentacles do not
+        if circularity > 0.7 and cyl_score < 0.15:
+            return {"component_type": "shaft", "shape_type": "cylinder",
+                    "elongation": elongation, "circularity": circularity}
+        return {"component_type": "tentacle", "shape_type": "sweep",
+                "elongation": elongation}
+
+    # Spherical bodies
     if sphere_score < 0.1:
         return {"component_type": "body", "shape_type": "sphere",
                 "sphere_score": sphere_score}
 
+    # Cylindrical housings (good cylinder fit, moderate proportions)
+    if cyl_score < 0.1 and circularity > 0.5:
+        return {"component_type": "housing", "shape_type": "cylinder",
+                "cyl_score": cyl_score, "circularity": circularity}
+
+    # Flanges: compact, circular, modest elongation
+    if circularity > 0.6 and elongation < 2.0 and rel_size < 0.5:
+        return {"component_type": "flange", "shape_type": "revolve",
+                "circularity": circularity, "elongation": elongation}
+
+    # High circularity body → revolve
+    if circularity > 0.5:
+        return {"component_type": "body", "shape_type": "revolve",
+                "elongation": elongation, "circularity": circularity}
+
+    # Default: extrude for mechanical, revolve for organic
+    if cyl_score < 0.2 or elongation > 2.5:
+        return {"component_type": "body", "shape_type": "extrude",
+                "elongation": elongation}
+
     return {"component_type": "body", "shape_type": "revolve",
             "elongation": elongation}
+
+
+def _reconstruct_component(comp_v, comp_f, comp_type, shape):
+    """Reconstruct a single component using the best strategy for its type.
+
+    Tries the shape-specific reconstructor first, then revolve as fallback,
+    and keeps the best result by quality.
+
+    Returns:
+        (cad_vertices, cad_faces)
+    """
+    if comp_type == "detail":
+        return comp_v.copy(), comp_f.copy()
+
+    # Map shape type to primary reconstructor
+    primary_fns = {
+        "sphere": lambda: reconstruct_sphere(comp_v),
+        "cylinder": lambda: reconstruct_cylinder(comp_v),
+        "cone": lambda: reconstruct_cone(comp_v),
+        "box": lambda: reconstruct_box(comp_v),
+        "revolve": lambda: reconstruct_revolve(comp_v, comp_f),
+        "extrude": lambda: reconstruct_extrude(comp_v, comp_f),
+        "sweep": lambda: reconstruct_sweep(comp_v, comp_f),
+        "freeform": lambda: reconstruct_freeform(comp_v, comp_f),
+    }
+
+    best_v, best_f = comp_v.copy(), comp_f.copy()
+    best_q = 0.0
+
+    # Try primary reconstructor
+    primary_fn = primary_fns.get(shape)
+    if primary_fn is not None:
+        try:
+            result = primary_fn()
+            q = _measure_quality(result["cad_vertices"], comp_v)
+            if q > best_q:
+                best_v = result["cad_vertices"]
+                best_f = result["cad_faces"]
+                best_q = q
+        except Exception:
+            pass
+
+    # Always try revolve as competitor (it works well for many shapes)
+    if shape != "revolve":
+        try:
+            rev = reconstruct_revolve(comp_v, comp_f)
+            rq = rev.get("quality", 0.0)
+            if rq > best_q:
+                best_v = rev["cad_vertices"]
+                best_f = rev["cad_faces"]
+                best_q = rq
+        except Exception:
+            pass
+
+    return best_v, best_f
 
 
 def reconstruct_composite(vertices, faces):
@@ -2052,18 +2151,18 @@ def reconstruct_composite(vertices, faces):
     if len(significant) <= 1:
         return None
 
-    # Classify significant components and check for structural diversity
+    # Classify significant components
     comp_types = []
+    comp_classes = []
     for cv, cf, idx in significant:
         cls = _classify_component(cv, cf, bbox_diag)
         comp_types.append(cls["component_type"])
+        comp_classes.append(cls)
 
     unique_types = set(comp_types)
-    # All same type => not truly composite
-    if len(unique_types) == 1:
-        return None
-    # Need tentacles for composite to be worthwhile
-    if "tentacle" not in unique_types:
+    # Multiple significant components with diverse types => composite
+    # Also accept if there are 3+ components even of same type (assembly)
+    if len(unique_types) == 1 and len(significant) < 3:
         return None
 
     all_cad_v = []
@@ -2085,54 +2184,13 @@ def reconstruct_composite(vertices, faces):
             "n_faces": len(comp_f),
         })
 
-    # Reconstruct significant components
+    # Reconstruct significant components using best-fit strategy
     for comp_v, comp_f, orig_idx in significant:
-        # Classify this component
         cls = _classify_component(comp_v, comp_f, bbox_diag)
         comp_type = cls["component_type"]
         shape = cls["shape_type"]
 
-        # Reconstruct based on component type
-        if comp_type == "detail":
-            # Keep small details as-is (eyes, suckers, etc.)
-            cad_v, cad_f = comp_v.copy(), comp_f.copy()
-        elif comp_type == "tentacle" and shape == "sweep":
-            # Use sweep reconstruction for tentacles
-            try:
-                sweep_result = reconstruct_sweep(comp_v, comp_f)
-                cad_v = sweep_result["cad_vertices"]
-                cad_f = sweep_result["cad_faces"]
-                # Check if sweep is better than revolve-project
-                sq = _measure_quality(cad_v, comp_v)
-                rev_result = reconstruct_revolve(comp_v, comp_f)
-                rq = rev_result.get("quality", 0.0)
-                if rq > sq:
-                    cad_v = rev_result["cad_vertices"]
-                    cad_f = rev_result["cad_faces"]
-            except Exception:
-                cad_v, cad_f = comp_v.copy(), comp_f.copy()
-        elif comp_type == "body" and shape == "sphere":
-            try:
-                sphere_result = reconstruct_sphere(comp_v)
-                cad_v = sphere_result["cad_vertices"]
-                cad_f = sphere_result["cad_faces"]
-                sq = _measure_quality(cad_v, comp_v)
-                # Compare sphere vs revolve and use whichever is better
-                rev_result = reconstruct_revolve(comp_v, comp_f)
-                rq = rev_result.get("quality", 0.0)
-                if rq > sq:
-                    cad_v = rev_result["cad_vertices"]
-                    cad_f = rev_result["cad_faces"]
-            except Exception:
-                cad_v, cad_f = comp_v.copy(), comp_f.copy()
-        else:
-            # Default: revolve reconstruction
-            try:
-                result = reconstruct_revolve(comp_v, comp_f)
-                cad_v = result["cad_vertices"]
-                cad_f = result["cad_faces"]
-            except Exception:
-                cad_v, cad_f = comp_v.copy(), comp_f.copy()
+        cad_v, cad_f = _reconstruct_component(comp_v, comp_f, comp_type, shape)
 
         # Accumulate into combined mesh
         all_cad_v.append(cad_v)
