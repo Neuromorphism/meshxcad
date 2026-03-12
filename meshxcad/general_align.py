@@ -25,8 +25,30 @@ target mesh through surface-level analysis, deformation, and correction.
 """
 
 import math
+import weakref as _weakref
 import numpy as np
 from scipy.spatial import KDTree
+
+_KDTREE_CACHE: dict = {}
+_KDTREE_CACHE_MAX = 8
+
+def _get_cached_tree(vertices):
+    """Return a KDTree for vertices, reusing cached tree when possible."""
+    arr = np.asarray(vertices, dtype=np.float64)
+    key = id(arr)
+    if key in _KDTREE_CACHE:
+        ref, tree = _KDTREE_CACHE[key]
+        if ref() is arr:
+            return tree
+    tree = KDTree(arr)
+    if len(_KDTREE_CACHE) >= _KDTREE_CACHE_MAX:
+        oldest_key = next(iter(_KDTREE_CACHE))
+        del _KDTREE_CACHE[oldest_key]
+    try:
+        _KDTREE_CACHE[key] = (_weakref.ref(arr), tree)
+    except TypeError:
+        pass
+    return tree
 
 from .gpu import (AcceleratedKDTree as _AKDTree,
                   hausdorff_distance_gpu as _hausdorff_gpu,
@@ -158,7 +180,7 @@ def hausdorff_distance(vertices_a, vertices_b):
     a = np.asarray(vertices_a, dtype=np.float64)
     b = np.asarray(vertices_b, dtype=np.float64)
 
-    tree_b = KDTree(b)
+    tree_b = _get_cached_tree(b)
     d_a2b, _ = tree_b.query(a)
 
     tree_a = KDTree(a)

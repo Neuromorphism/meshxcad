@@ -188,11 +188,14 @@ def score_symmetry_exploitation(program, target_v):
         return 0.6
 
 
-def score_no_redundancy(program, target_v, target_f):
+def score_no_redundancy(program, target_v, target_f, fast=False):
     """Score whether every operation contributes to the final result.
 
     Camba et al. "conciseness": unique_operations / total_operations.
     An op is redundant if removing it barely changes the output.
+
+    Args:
+        fast: When True, skip Hausdorff computation and return a neutral score.
 
     Returns:
         float: 0.0 to 1.0 (1.0 = no redundancy)
@@ -200,6 +203,9 @@ def score_no_redundancy(program, target_v, target_f):
     enabled = [i for i, op in enumerate(program.operations) if op.enabled]
     if len(enabled) <= 1:
         return 1.0
+
+    if fast:
+        return 0.75
 
     base_cost = program.total_cost(target_v, target_f)
     if not np.isfinite(base_cost):
@@ -651,8 +657,13 @@ ELEGANCE_WEIGHTS = {
 }
 
 
-def compute_elegance_score(program, target_v, target_f):
+def compute_elegance_score(program, target_v, target_f, fast=False):
     """Compute the full elegance score for a CadProgram.
+
+    Args:
+        fast: When True, skip expensive Hausdorff-based sub-scorers and use
+              fast proxies instead (score_feature_fidelity returns 0.8,
+              score_no_redundancy returns 0.75).
 
     Returns:
         dict with per-dimension scores (0-1) and weighted total (0-1).
@@ -663,11 +674,11 @@ def compute_elegance_score(program, target_v, target_f):
 
     scores = {
         "accuracy":           score_accuracy(program, target_v, target_f),
-        "feature_fidelity":   score_feature_fidelity(program, target_v, target_f),
+        "feature_fidelity":   0.8 if fast else score_feature_fidelity(program, target_v, target_f),
         "conciseness":        score_conciseness(program),
         "op_hierarchy":       score_op_hierarchy(program),
         "symmetry":           score_symmetry_exploitation(program, target_v),
-        "no_redundancy":      score_no_redundancy(program, target_v, target_f),
+        "no_redundancy":      score_no_redundancy(program, target_v, target_f, fast=fast),
         "tree_depth":         score_feature_tree_depth(program),
         "param_economy":      score_parameter_economy(program),
         "origin_anchoring":   score_origin_anchoring(program),
@@ -1066,7 +1077,8 @@ def _generate_anti_cad_mutations(program, features, target_v, target_f):
     for gap in gaps[:1]:
         if gap.nearest_program_op >= 0:
             p = program.copy()
-            refine_operation(p, gap.nearest_program_op, target_v, target_f)
+            refine_operation(p, gap.nearest_program_op, target_v, target_f,
+                             max_iter=2, fast=True)
             mutations.append(("refine_accuracy", p))
 
     # Strategy 4: Add small operations to create irregularity
@@ -1112,7 +1124,7 @@ def _generate_anti_cad_mutations(program, features, target_v, target_f):
                 add_operation(p, gap)
                 # Refine the newly added op
                 refine_operation(p, len(p.operations) - 1,
-                                 target_v, target_f, max_iter=15)
+                                 target_v, target_f, max_iter=2, fast=True)
                 mutations.append((f"add_gap_primitive_{i}", p))
 
     # Strategy 7: Add subtract_cylinder for concavities
@@ -1299,7 +1311,7 @@ def _mutate_for_elegance(program, target_v, target_f, rng):
             if op.enabled and op.op_type in ("sphere", "cylinder", "profiled_cylinder",
                                                "box", "cone", "revolve"):
                 p = program.copy()
-                refine_operation(p, i, target_v, target_f, max_iter=15)
+                refine_operation(p, i, target_v, target_f, max_iter=2, fast=True)
                 mutations.append(("refine_" + op.op_type, p))
                 break
 
@@ -1331,7 +1343,7 @@ def _mutate_for_elegance(program, target_v, target_f, rng):
                 p = program.copy()
                 add_operation(p, gap)
                 refine_operation(p, len(p.operations) - 1,
-                                 target_v, target_f, max_iter=10)
+                                 target_v, target_f, max_iter=2, fast=True)
                 mutations.append((f"add_refined_gap_{i}", p))
 
     # Strategy 9: Multi-gap fill — add 2-3 primitives at once
@@ -1344,7 +1356,7 @@ def _mutate_for_elegance(program, target_v, target_f, rng):
             # Refine all new ops
             n_old = program.n_enabled()
             for j in range(len(p.operations) - len(gaps), len(p.operations)):
-                refine_operation(p, j, target_v, target_f, max_iter=10)
+                refine_operation(p, j, target_v, target_f, max_iter=2, fast=True)
             mutations.append(("multi_gap_fill", p))
 
     # Strategy 10: Subtract cylinder for holes/concavities
@@ -1359,11 +1371,11 @@ def _mutate_for_elegance(program, target_v, target_f, rng):
         _try_torus_ring(program, target_v, target_f, mutations)
 
     # Strategy 12: Refine all ops (not just first) for multi-op programs
-    if 2 <= program.n_enabled() <= 8:
+    if 2 <= program.n_enabled() <= 6:
         p = program.copy()
         for i, op in enumerate(p.operations):
             if op.enabled:
-                refine_operation(p, i, target_v, target_f, max_iter=10)
+                refine_operation(p, i, target_v, target_f, max_iter=2, fast=True)
         mutations.append(("refine_all_ops", p))
 
     # Strategy 12b: Try batch h_divs for all cylinder ops at once
@@ -1388,7 +1400,7 @@ def _mutate_for_elegance(program, target_v, target_f, rng):
         for i, op in enumerate(program.operations):
             if op.enabled and op.op_type in ("revolve", "profiled_cylinder"):
                 p = program.copy()
-                refine_operation(p, i, target_v, target_f, max_iter=30)
+                refine_operation(p, i, target_v, target_f, max_iter=3, fast=True)
                 mutations.append(("intensive_refine", p))
                 break
 
@@ -1498,7 +1510,7 @@ def _try_torus_ring(program, target_v, target_f, mutations):
             p = program.copy()
             add_operation(p, gap)
             refine_operation(p, len(p.operations) - 1,
-                             target_v, target_f, max_iter=15)
+                             target_v, target_f, max_iter=2, fast=True)
             mutations.append(("add_torus_ring", p))
             break
         # Otherwise try fitting a torus at the gap center
@@ -1512,7 +1524,7 @@ def _try_torus_ring(program, target_v, target_f, mutations):
         }))
         p.invalidate_cache()
         refine_operation(p, len(p.operations) - 1,
-                         target_v, target_f, max_iter=15)
+                         target_v, target_f, max_iter=2, fast=True)
         mutations.append(("add_torus_ring", p))
         break
 
@@ -1549,7 +1561,7 @@ def _try_scaled_copy(program, target_v, target_f, mutations, rng):
     p.operations.append(CadOp(op.op_type, new_params))
     p.invalidate_cache()
     refine_operation(p, len(p.operations) - 1,
-                     target_v, target_f, max_iter=15)
+                     target_v, target_f, max_iter=2, fast=True)
     mutations.append(("add_scaled_copy", p))
 
 
@@ -1660,7 +1672,7 @@ def _try_feature_targeted_fill(program, target_v, target_f, mutations, rng):
         p.operations.append(best_op)
         p.invalidate_cache()
         refine_operation(p, len(p.operations) - 1,
-                         target_v, target_f, max_iter=30)
+                         target_v, target_f, max_iter=2, fast=True)
         mutations.append(("feature_fill", p))
 
     # Also try a multi-feature fill: add primitives for the 2-3 worst
@@ -1696,7 +1708,7 @@ def _try_feature_targeted_fill(program, target_v, target_f, mutations, rng):
         if added >= 2:
             p.invalidate_cache()
             for j in range(len(p.operations) - added, len(p.operations)):
-                refine_operation(p, j, target_v, target_f, max_iter=15)
+                refine_operation(p, j, target_v, target_f, max_iter=2, fast=True)
             mutations.append(("multi_feature_fill", p))
 
 
@@ -1749,7 +1761,7 @@ def _try_intersection_fillet(program, target_v, target_f, mutations):
         # Quick refine
         try:
             refine_operation(p, len(p.operations) - 1,
-                             target_v, target_f, max_iter=10)
+                             target_v, target_f, max_iter=2, fast=True)
         except Exception:
             pass
 
