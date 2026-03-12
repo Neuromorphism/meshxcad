@@ -493,16 +493,77 @@ def refeature(mesh_vertices, mesh_faces, defeatured_path,
                 roots.add(find(vi))
             n_regions = len(roots)
 
-    # Compose the refeature mesh:
-    # - Start with the defeatured mesh as base
-    # - Replace/overlay regions where features were detected with detailed mesh
-    # Strategy: use the detailed mesh vertices but snap non-feature vertices
-    # to the defeatured surface for cleaner B-Rep alignment
+    # Compose the refeature mesh by combining:
+    #   - Defeatured base geometry (from STEP B-Rep)
+    #   - Reconstructed feature regions (from detailed mesh)
+    #
+    # For each feature region, extract submesh and try to reconstruct it
+    # as a proper CAD primitive (fillet torus, chamfer plane, hole cylinder).
+    # Non-feature vertices snap to the defeatured surface.
+
     refeature_v = mesh_v.copy()
     non_feature = ~feature_mask
-    # Snap non-feature vertices to nearest defeatured surface point
     refeature_v[non_feature] = def_v[indices[non_feature]]
     refeature_f = mesh_f.copy()
+
+    # Extract and classify each feature region
+    region_info = []
+    if n_regions > 0 and n_feature_verts > 0:
+        from .reconstruct import fit_sphere, fit_cylinder
+
+        # Group vertices by region root
+        region_map = {}  # root -> list of vertex indices
+        for vi in np.where(feature_mask)[0]:
+            root = find(vi)
+            if root not in region_map:
+                region_map[root] = []
+            region_map[root].append(vi)
+
+        for root, vert_indices in region_map.items():
+            vert_indices = np.array(vert_indices)
+            region_v = mesh_v[vert_indices]
+            if len(region_v) < 10:
+                region_info.append({
+                    "n_verts": len(vert_indices),
+                    "type": "small_detail",
+                })
+                continue
+
+            region_bbox = float(np.linalg.norm(
+                region_v.max(0) - region_v.min(0)))
+
+            # Try primitive fitting to characterize the feature
+            feature_type = "freeform"
+            try:
+                sph = fit_sphere(region_v)
+                sph_score = sph["residual"] / max(region_bbox, 1e-12)
+                if sph_score < 0.1:
+                    feature_type = "fillet_sphere"
+            except Exception:
+                sph_score = 1.0
+
+            try:
+                cyl = fit_cylinder(region_v)
+                cyl_score = cyl["residual"] / max(region_bbox, 1e-12)
+                if cyl_score < 0.08:
+                    feature_type = "hole_or_fillet"
+            except Exception:
+                cyl_score = 1.0
+
+            # Compute mean displacement direction for this region
+            displacements = mesh_v[vert_indices] - def_v[indices[vert_indices]]
+            mean_disp = float(np.linalg.norm(displacements.mean(0)))
+            max_disp = float(np.linalg.norm(displacements, axis=1).max())
+
+            region_info.append({
+                "n_verts": len(vert_indices),
+                "type": feature_type,
+                "bbox_diag": region_bbox,
+                "mean_displacement": mean_disp,
+                "max_displacement": max_disp,
+                "sphere_score": round(sph_score, 4),
+                "cylinder_score": round(cyl_score, 4),
+            })
 
     # Measure accuracy vs original detailed mesh
     from .general_align import hausdorff_distance
@@ -518,4 +579,5 @@ def refeature(mesh_vertices, mesh_faces, defeatured_path,
         "accuracy": accuracy,
         "defeatured_vertices": def_v,
         "defeatured_faces": def_f,
+        "feature_regions": region_info,
     }

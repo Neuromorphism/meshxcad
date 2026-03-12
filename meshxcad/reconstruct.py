@@ -2132,37 +2132,45 @@ def reconstruct_composite(vertices, faces):
 
     bbox_diag = float(np.linalg.norm(v.max(axis=0) - v.min(axis=0)))
 
-    # Filter out tiny artifact components (mesh noise, floating fragments)
-    # A component is "significant" if it has >= 3% of total vertices
-    # and its bounding box is >= 5% of the total mesh diagonal
+    # Classify components into three tiers:
+    #   - significant: >= 1% of total verts AND >= 2% of bbox diagonal
+    #     → full shape-specific reconstruction
+    #   - minor: >= 10 verts but below significant thresholds
+    #     → try primitive fitting (sphere/cylinder), identity fallback
+    #   - degenerate: < 10 verts → skip
     total_verts = len(v)
-    significant_idx = set()
     significant = []
+    minor = []
+    significant_idx = set()
+    minor_idx = set()
     for ci, (comp_v, comp_f, orig_idx) in enumerate(components):
+        if len(comp_v) < 10:
+            continue  # degenerate
         comp_bbox_diag = float(np.linalg.norm(
             comp_v.max(axis=0) - comp_v.min(axis=0)))
-        is_significant = (len(comp_v) >= total_verts * 0.03 and
-                          comp_bbox_diag >= bbox_diag * 0.05)
+        is_significant = (len(comp_v) >= total_verts * 0.01 and
+                          comp_bbox_diag >= bbox_diag * 0.02)
         if is_significant:
             significant.append((comp_v, comp_f, orig_idx))
             significant_idx.add(ci)
+        else:
+            minor.append((comp_v, comp_f, orig_idx))
+            minor_idx.add(ci)
 
-    # If only 0 or 1 significant components, not truly composite
-    if len(significant) <= 1:
+    # Need at least 2 non-degenerate components for composite
+    total_nondegen = len(significant) + len(minor)
+    if total_nondegen <= 1:
         return None
 
     # Classify significant components
     comp_types = []
-    comp_classes = []
     for cv, cf, idx in significant:
         cls = _classify_component(cv, cf, bbox_diag)
         comp_types.append(cls["component_type"])
-        comp_classes.append(cls)
 
     unique_types = set(comp_types)
-    # Multiple significant components with diverse types => composite
-    # Also accept if there are 3+ components even of same type (assembly)
-    if len(unique_types) == 1 and len(significant) < 3:
+    # Accept composite if diverse types OR 3+ significant components
+    if len(unique_types) == 1 and len(significant) < 3 and len(minor) < 5:
         return None
 
     all_cad_v = []
@@ -2170,16 +2178,40 @@ def reconstruct_composite(vertices, faces):
     comp_info = []
     v_offset = 0
 
-    # Add insignificant components as identity copies (preserves mesh completeness)
-    for ci, (comp_v, comp_f, orig_idx) in enumerate(components):
-        if ci in significant_idx:
-            continue
-        all_cad_v.append(comp_v.copy())
-        all_cad_f.append(comp_f + v_offset)
-        v_offset += len(comp_v)
+    # Reconstruct minor components with fast primitive fitting
+    for comp_v, comp_f, orig_idx in minor:
+        cad_v, cad_f = comp_v.copy(), comp_f.copy()
+        fit_type = "identity"
+        # Try sphere/cylinder fit for small parts (fast)
+        if len(comp_v) >= 20:
+            comp_bbox = float(np.linalg.norm(
+                comp_v.max(0) - comp_v.min(0)))
+            try:
+                sph = fit_sphere(comp_v)
+                if sph["residual"] / max(comp_bbox, 1e-12) < 0.08:
+                    sr = reconstruct_sphere(comp_v)
+                    cad_v = sr["cad_vertices"]
+                    cad_f = sr["cad_faces"]
+                    fit_type = "sphere"
+            except Exception:
+                pass
+            if fit_type == "identity":
+                try:
+                    cyl = fit_cylinder(comp_v)
+                    if cyl["residual"] / max(comp_bbox, 1e-12) < 0.08:
+                        cr = reconstruct_cylinder(comp_v)
+                        cad_v = cr["cad_vertices"]
+                        cad_f = cr["cad_faces"]
+                        fit_type = "cylinder"
+                except Exception:
+                    pass
+
+        all_cad_v.append(cad_v)
+        all_cad_f.append(cad_f + v_offset)
+        v_offset += len(cad_v)
         comp_info.append({
             "component_type": "detail",
-            "shape_type": "identity",
+            "shape_type": fit_type,
             "n_verts": len(comp_v),
             "n_faces": len(comp_f),
         })
