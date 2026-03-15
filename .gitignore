@@ -11,6 +11,12 @@ test_data/sphere/
 test_data/cylinder/
 .pytest_cache/
 learned_weights/shards/
+.venvs/
+.cache/
+external/*
+!external/*.md
+!external/*.sh
+!external/*.env
 
 # Ignore STL/OBJ globally except in dev_models/
 *.stl

@@ -1,0 +1,7 @@
+cadquery
+huggingface-hub
+numpy
+safetensors
+torch
+transformers>=4.47.1
+trimesh
